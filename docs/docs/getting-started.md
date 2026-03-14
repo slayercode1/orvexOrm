@@ -182,3 +182,4 @@ Maintenant que tu connais les bases, tu peux explorer les guides :
 | **[Transactions](/docs/guides/transactions)** | Executer plusieurs requetes de maniere atomique (avec auto-commit) |
 | **[Cache](/docs/guides/cache)** | Reduire les requetes SQL avec un cache TTL |
 | **[JSON](/docs/guides/json-columns)** | Stocker des tables Lua en JSON automatiquement |
+| **[Studio](/docs/guides/studio)** | Interface web pour visualiser et gerer ta base de donnees |

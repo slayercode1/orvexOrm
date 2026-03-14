@@ -8,11 +8,11 @@ Zero SQL. Zero galere. Juste du Lua propre.
 
 [![Lua](https://img.shields.io/badge/Lua-5.4-blue?logo=lua&logoColor=white)](https://www.lua.org/)
 [![FiveM](https://img.shields.io/badge/FiveM-Compatible-orange)](https://fivem.net/)
-[![License](https://img.shields.io/badge/License-Proprietary-red)](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 [![oxmysql](https://img.shields.io/badge/oxmysql-Compatible-purple)](https://github.com/overextended/oxmysql)
 [![mysql-async](https://img.shields.io/badge/mysql--async-Compatible-purple)](https://github.com/brouznouf/fivem-mysql-async)
 
-[Documentation](https://orvexorm.dev) | [Installation](#installation) | [Exemples](#exemples-rapides)
+[Documentation](https://orvexorm.yann-dev.fr) | [GitHub](https://github.com/slayercode1/orvexOrm) | [Installation](#installation) | [Exemples](#exemples-rapides)
 
 ---
 
@@ -45,12 +45,11 @@ player:update({ money = 1000 })
 
 ## Installation
 
-```bash
-npx orvexorm install
-```
+1. Telecharge la derniere release sur [GitHub Releases](https://github.com/slayercode1/orvexOrm/releases)
+2. Extrait le dossier `orvexorm` dans `resources/` de ton serveur
+3. Ajoute dans ton `server.cfg` :
 
 ```cfg
-# server.cfg
 ensure oxmysql    # ou mysql-async
 ensure orvexorm
 ```
@@ -325,6 +324,29 @@ Benchmarks sur Lua 5.3 (FiveM utilise Lua 5.4 = encore plus rapide) :
 
 ---
 
+## OrvexORM Studio
+
+Interface web integree pour visualiser et gerer ta base de donnees. **Zero dependance, 100% Lua.**
+
+Dans la console txAdmin :
+```
+orvexstudio
+```
+
+Le studio lit automatiquement ton `mysql_connection_string`, genere un token secret, et affiche l'URL securisee :
+```
+http://localhost:30120/orvexorm/?token=a1b2c3d4...
+```
+
+- Voir toutes les tables et leur schema
+- Parcourir, filtrer et trier les donnees
+- Ajouter, modifier et supprimer des lignes
+- Protege par token (seul l'admin console a le lien)
+
+> Documentation complete : [Studio](https://orvexorm.yann-dev.fr/docs/guides/studio)
+
+---
+
 ## Compatibilite
 
 | | Supporte |
@@ -337,6 +359,12 @@ Benchmarks sur Lua 5.3 (FiveM utilise Lua 5.4 = encore plus rapide) :
 
 ---
 
+## Contribuer
+
+Les contributions sont les bienvenues ! N'hesite pas a ouvrir une [issue](https://github.com/slayercode1/orvexOrm/issues) ou une [pull request](https://github.com/slayercode1/orvexOrm/pulls).
+
+---
+
 ## Licence
 
-[Proprietary](LICENSE) - OrvexORM est un logiciel proprietaire. L'utilisation est autorisee uniquement via les fichiers compiles (`.luac`) distribues officiellement. Le code source n'est pas open source.
+[MIT](LICENSE) - Open source, libre d'utilisation.

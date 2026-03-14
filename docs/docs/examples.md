@@ -422,3 +422,15 @@ local richCops = User.findAll({
     money = { ">", 10000 },
 })
 ```
+
+---
+
+## OrvexORM Studio
+
+Pour visualiser et gerer ta base de donnees sans ecrire de code, tape dans la console txAdmin :
+
+```
+orvexstudio
+```
+
+Le studio s'ouvre dans ton navigateur avec un lien securise. Zero installation, c'est integre a la ressource. Voir le guide complet : [Studio](/docs/guides/studio).

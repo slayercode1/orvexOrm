@@ -8,73 +8,53 @@ slug: /installation
 ## Prerequisites
 
 - A working **FiveM** server
-- **oxmysql** installed and configured
+- **oxmysql** or **mysql-async** installed and configured (either one works)
 - A **MySQL** or **MariaDB** database
 
----
-
-## Method 1: CLI (recommended)
-
-Install OrvexORM with a single command from the root of your FiveM server:
-
-```bash
-npx orvexorm install
-```
-
-That's it. The CLI automatically detects your `resources/` folder and installs OrvexORM as **compiled bytecode** (`.luac`). Source code is not included.
-
-:::tip Available commands
-```bash
-npx orvexorm install              # Install OrvexORM (compiled .luac)
-npx orvexorm update               # Update OrvexORM
-npx orvexorm init my-resource     # Create a pre-configured resource
-npx orvexorm help                 # Help
-```
+:::info Compatibility
+OrvexORM automatically detects which MySQL library is installed on your server. No configuration needed — it works with both.
 :::
 
 ---
 
-## Method 2: Manual download
+## Method 1: GitHub Release (recommended)
 
-Download the latest release and place the folder in `resources/`:
+1. Download the latest release from [GitHub Releases](https://github.com/slayercode1/orvexOrm/releases)
+2. Extract the `orvexorm` folder into your `resources/` directory
+3. That's it!
 
 ```
 your-server/
 └── resources/
     └── orvexorm/
-        ├── core/*.luac
-        ├── database/*.luac
-        ├── utils/*.luac
-        ├── lib/
+        ├── core/*.lua
+        ├── database/*.lua
+        ├── utils/*.lua
+        ├── lib/*.lua
         └── fxmanifest.lua
 ```
-
-:::info Compiled distribution
-The release contains `.luac` files (Lua 5.4 bytecode). This is the recommended format — lightweight, fast, and source code is not readable.
-:::
 
 ---
 
 ## Start the resource
 
 ```cfg title="server.cfg"
+# With oxmysql:
 ensure oxmysql
+ensure orvexorm
+
+# OR with mysql-async:
+ensure mysql-async
 ensure orvexorm
 ```
 
 :::caution Important
-`oxmysql` must **always** be started before `orvexorm`.
+Your MySQL library (`oxmysql` or `mysql-async`) must **always** be started before `orvexorm`.
 :::
 
 ## Use in your resource
 
-You can also generate a pre-configured resource with the CLI:
-
-```bash
-npx orvexorm init my-resource
-```
-
-Or configure manually:
+Configure your resource to use OrvexORM:
 
 **Option A: Direct import (recommended)**
 
@@ -89,6 +69,10 @@ server_scripts {
     'server.lua',
 }
 ```
+
+:::tip Migrations and schema
+To use migrations or schema features, use the full `@orvexorm/` include pattern in your `fxmanifest.lua`. All features (migrations, schema builder, introspection) are available through the direct import.
+:::
 
 ```lua title="your-resource/server.lua"
 -- OrvexORM is available globally

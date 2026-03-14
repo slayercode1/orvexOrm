@@ -13,7 +13,6 @@ server_scripts {
     'utils/cache.lua',
     'utils/logger.lua',
 
-    'database/mysql_async.lua',
     'database/mysql.lua',
     'database/adapter.lua',
 
@@ -27,6 +26,7 @@ server_scripts {
     'core/orm.lua',
 
     'lib/export.lua',
+    'lib/studio.lua',
 }
 
 lua54 'yes'

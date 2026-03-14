@@ -1,31 +1,27 @@
 -- utils/cache.lua
--- In-memory TTL cache for query results.
--- Reduces database hits for frequently accessed data.
 
 ---@class OrvexCacheEntry
 ---@field value any
----@field expires number  os.time() when this entry expires
+---@field expires number
 
 ---@class OrvexCache
 ---@field private _store table<string, OrvexCacheEntry>
----@field private _ttl number  Default TTL in seconds
+---@field private _ttl number
 ---@field private _enabled boolean
 local Cache = {}
 Cache.__index = Cache
 
---- Create a new cache instance.
 ---@param opts? { ttl?: number, enabled?: boolean }
 ---@return OrvexCache
 function Cache.new(opts)
     opts = opts or {}
     local self = setmetatable({}, Cache)
     self._store   = {}
-    self._ttl     = opts.ttl or 60       -- default 60 seconds
-    self._enabled = opts.enabled ~= false -- enabled by default
+    self._ttl     = opts.ttl or 60
+    self._enabled = opts.enabled ~= false
     return self
 end
 
---- Generate a cache key from a SQL query and its params.
 --- Optimized: builds string directly for common cases.
 ---@param sql string
 ---@param params any[]
@@ -34,7 +30,6 @@ function Cache.makeKey(sql, params)
     if not params or #params == 0 then
         return sql
     end
-    -- Fast path for 1-3 params (most common)
     local n = #params
     if n == 1 then
         return sql .. ":" .. tostring(params[1])
@@ -43,7 +38,6 @@ function Cache.makeKey(sql, params)
     elseif n == 3 then
         return sql .. ":" .. tostring(params[1]) .. ":" .. tostring(params[2]) .. ":" .. tostring(params[3])
     end
-    -- General case
     local parts = { sql }
     for i = 1, n do
         parts[i + 1] = tostring(params[i])
@@ -51,7 +45,6 @@ function Cache.makeKey(sql, params)
     return table.concat(parts, ":")
 end
 
---- Get a value from the cache. Returns nil if not found or expired.
 ---@param key string
 ---@return any|nil value
 ---@return boolean hit
@@ -73,10 +66,9 @@ function Cache:get(key)
     return entry.value, true
 end
 
---- Store a value in the cache.
 ---@param key string
 ---@param value any
----@param ttl? number  Override the default TTL for this entry
+---@param ttl? number
 function Cache:set(key, value, ttl)
     if not self._enabled then return end
 
@@ -86,15 +78,12 @@ function Cache:set(key, value, ttl)
     }
 end
 
---- Remove a specific key from the cache.
 ---@param key string
 function Cache:invalidate(key)
     self._store[key] = nil
 end
 
---- Remove all entries matching a pattern (table name prefix).
---- Used to invalidate all cached queries for a table after a write.
----@param prefix string  e.g. "SELECT * FROM users"
+---@param prefix string
 function Cache:invalidatePrefix(prefix)
     local toRemove = {}
     for k in pairs(self._store) do
@@ -107,7 +96,6 @@ function Cache:invalidatePrefix(prefix)
     end
 end
 
---- Remove all entries that mention a table name anywhere in the key.
 --- Catches JOINs and subqueries that reference the table.
 ---@param tableName string
 function Cache:invalidateTable(tableName)
@@ -122,12 +110,10 @@ function Cache:invalidateTable(tableName)
     end
 end
 
---- Clear the entire cache.
 function Cache:flush()
     self._store = {}
 end
 
---- Enable or disable the cache.
 ---@param enabled boolean
 function Cache:setEnabled(enabled)
     self._enabled = enabled
@@ -136,7 +122,6 @@ function Cache:setEnabled(enabled)
     end
 end
 
---- Get the number of entries currently in the cache.
 ---@return integer
 function Cache:size()
     local count = 0

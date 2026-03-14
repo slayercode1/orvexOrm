@@ -1,5 +1,4 @@
 -- core/builder.lua
--- Chainable query builder.
 
 local Helpers   = OrvexHelpers or require("utils.helpers")
 local CacheLib  = OrvexCache or require("utils.cache")
@@ -10,8 +9,8 @@ local assertOp = Helpers.assertValidOperator
 ---@alias OrvexWhereOperator "="|"!="|">"|"<"|">="|"<="|"LIKE"|"NOT LIKE"|"IN"|"NOT IN"|"BETWEEN"|"IS"|"IS NOT"
 
 ---@class OrvexWhereValue
----@field [1] OrvexWhereOperator  Operator
----@field [2] any                  Value (or table for IN/BETWEEN)
+---@field [1] OrvexWhereOperator
+---@field [2] any
 
 ---@class OrvexWhereEntry
 ---@field clause string
@@ -36,7 +35,6 @@ local assertOp = Helpers.assertValidOperator
 local Builder = {}
 Builder.__index = Builder
 
---- Create a new query builder for a table.
 ---@param tableName string
 ---@param adapter OrvexAdapter
 ---@param wrapFn? fun(row: table): OrvexInstance
@@ -63,7 +61,6 @@ end
 
 -- ─── Internal: parse a single where condition ─────────────────────
 
---- Parse a single key/value pair into a where entry.
 ---@param k string
 ---@param v any
 ---@param orFlag? boolean
@@ -115,22 +112,19 @@ end
 
 -- ─── Chainable methods ─────────────────────────────────────────────
 
---- Set the columns to select.
----@param columns string  e.g. "users.*, profiles.bio"
+---@param columns string
 ---@return OrvexBuilder
 function Builder:select(columns)
     self._selects = columns
     return self
 end
 
---- Enable DISTINCT on the query.
 ---@return OrvexBuilder
 function Builder:distinct()
     self._distinct = true
     return self
 end
 
---- Add a WHERE condition.
 ---@param field string|table<string, any|OrvexWhereValue>
 ---@param operator? OrvexWhereOperator|any
 ---@param value? any
@@ -146,7 +140,6 @@ function Builder:where(field, operator, value)
         return self
     end
 
-    -- Shortcut: :where("field", value) → implicit "="
     if type(field) == "string" and operator ~= nil and value == nil then
         assertId(field)
         self._wheres[#self._wheres + 1] = {
@@ -167,7 +160,6 @@ function Builder:where(field, operator, value)
     error("Invalid where() arguments")
 end
 
---- Add an OR WHERE condition.
 ---@param field string|table<string, any|OrvexWhereValue>
 ---@param operator? OrvexWhereOperator|any
 ---@param value? any
@@ -184,7 +176,6 @@ function Builder:orWhere(field, operator, value)
         return self
     end
 
-    -- Shortcut: :orWhere("field", value) → implicit "="
     if type(field) == "string" and operator ~= nil and value == nil then
         assertId(field)
         self._wheres[#self._wheres + 1] = {
@@ -206,10 +197,9 @@ function Builder:orWhere(field, operator, value)
     return self
 end
 
---- Add a WHERE IN condition. Accepts an array of values OR a subquery string.
 ---@param column string
----@param valuesOrSQL string|any[]  Array of values or raw SQL subquery
----@param subParams? any[]          Only used when valuesOrSQL is a subquery string
+---@param valuesOrSQL string|any[]
+---@param subParams? any[]
 ---@return OrvexBuilder
 function Builder:whereIn(column, valuesOrSQL, subParams)
     assertId(column)
@@ -229,7 +219,6 @@ function Builder:whereIn(column, valuesOrSQL, subParams)
     return self
 end
 
---- Add a WHERE NOT IN condition. Accepts an array of values OR a subquery string.
 ---@param column string
 ---@param valuesOrSQL string|any[]
 ---@param subParams? any[]
@@ -252,7 +241,6 @@ function Builder:whereNotIn(column, valuesOrSQL, subParams)
     return self
 end
 
---- Shortcut: WHERE column BETWEEN min AND max.
 ---@param column string
 ---@param min any
 ---@param max any
@@ -266,7 +254,6 @@ function Builder:whereBetween(column, min, max)
     return self
 end
 
---- Shortcut: WHERE column NOT BETWEEN min AND max.
 ---@param column string
 ---@param min any
 ---@param max any
@@ -280,7 +267,6 @@ function Builder:whereNotBetween(column, min, max)
     return self
 end
 
---- Shortcut: WHERE column LIKE pattern.
 ---@param column string
 ---@param pattern string
 ---@return OrvexBuilder
@@ -293,7 +279,6 @@ function Builder:whereLike(column, pattern)
     return self
 end
 
---- Add a WHERE NULL condition.
 ---@param column string
 ---@return OrvexBuilder
 function Builder:whereNull(column)
@@ -305,7 +290,6 @@ function Builder:whereNull(column)
     return self
 end
 
---- Add a WHERE NOT NULL condition.
 ---@param column string
 ---@return OrvexBuilder
 function Builder:whereNotNull(column)
@@ -317,7 +301,6 @@ function Builder:whereNotNull(column)
     return self
 end
 
---- Add a LEFT JOIN clause.
 ---@param joinTable string
 ---@param col1 string
 ---@param col2 string
@@ -332,7 +315,6 @@ function Builder:leftJoin(joinTable, col1, col2)
     return self
 end
 
---- Add an INNER JOIN clause.
 ---@param joinTable string
 ---@param col1 string
 ---@param col2 string
@@ -347,7 +329,6 @@ function Builder:innerJoin(joinTable, col1, col2)
     return self
 end
 
---- Add a RIGHT JOIN clause.
 ---@param joinTable string
 ---@param col1 string
 ---@param col2 string
@@ -362,7 +343,6 @@ function Builder:rightJoin(joinTable, col1, col2)
     return self
 end
 
---- Set GROUP BY clause.
 ---@param columns string
 ---@return OrvexBuilder
 function Builder:groupBy(columns)
@@ -370,7 +350,6 @@ function Builder:groupBy(columns)
     return self
 end
 
---- Set HAVING clause.
 ---@param clause string
 ---@param ... any
 ---@return OrvexBuilder
@@ -380,7 +359,6 @@ function Builder:having(clause, ...)
     return self
 end
 
---- Set ORDER BY clause.
 ---@param column string
 ---@param direction? "ASC"|"DESC"
 ---@return OrvexBuilder
@@ -392,7 +370,6 @@ function Builder:orderBy(column, direction)
     return self
 end
 
---- Shortcut: ORDER BY column DESC.
 ---@param column string
 ---@return OrvexBuilder
 function Builder:orderByDesc(column)
@@ -401,7 +378,6 @@ function Builder:orderByDesc(column)
     return self
 end
 
---- Shortcut: ORDER BY column ASC.
 ---@param column string
 ---@return OrvexBuilder
 function Builder:orderByAsc(column)
@@ -410,8 +386,7 @@ function Builder:orderByAsc(column)
     return self
 end
 
---- Shortcut: ORDER BY created_at DESC (most recent first).
----@param column? string  Default "created_at"
+---@param column? string
 ---@return OrvexBuilder
 function Builder:latest(column)
     column = column or "created_at"
@@ -420,8 +395,7 @@ function Builder:latest(column)
     return self
 end
 
---- Shortcut: ORDER BY created_at ASC (oldest first).
----@param column? string  Default "created_at"
+---@param column? string
 ---@return OrvexBuilder
 function Builder:oldest(column)
     column = column or "created_at"
@@ -430,7 +404,6 @@ function Builder:oldest(column)
     return self
 end
 
---- Set LIMIT.
 ---@param n integer
 ---@return OrvexBuilder
 function Builder:limit(n)
@@ -438,7 +411,6 @@ function Builder:limit(n)
     return self
 end
 
---- Set OFFSET.
 ---@param n integer
 ---@return OrvexBuilder
 function Builder:offset(n)
@@ -446,7 +418,6 @@ function Builder:offset(n)
     return self
 end
 
---- Cursor-based pagination: fetch rows after a given cursor value.
 ---@param column string
 ---@param value any
 ---@param direction? "ASC"|"DESC"
@@ -463,7 +434,6 @@ function Builder:after(column, value, direction)
     return self
 end
 
---- Cursor-based pagination: fetch rows before a given cursor value.
 ---@param column string
 ---@param value any
 ---@param direction? "ASC"|"DESC"
@@ -573,7 +543,6 @@ function Builder:_cachedExecute(sql, params)
     return self._adapter:execute(sql, params) or {}
 end
 
---- Execute and return all matching rows as instances.
 ---@return OrvexInstance[]
 function Builder:get()
     local sql, params = self:_buildSQL()
@@ -590,7 +559,6 @@ function Builder:get()
     return rows
 end
 
---- Execute and return the first matching row, or nil.
 ---@return OrvexInstance|nil
 function Builder:first()
     self._limit = 1
@@ -598,60 +566,62 @@ function Builder:first()
     return results[1] or nil
 end
 
---- Execute a COUNT(*) query.
 ---@return integer
 function Builder:count()
     local sql, params = self:_buildSQL("COUNT(*) as cnt")
     local rows = self:_cachedExecute(sql, params)
-    if rows[1] then return rows[1].cnt or 0 end
+    if rows[1] then return tonumber(rows[1].cnt) or 0 end
     return 0
 end
 
---- Execute a SUM query.
+--- MySQL may return strings for aggregate results via the text protocol;
+--- tonumber() ensures we always return a Lua number.
 ---@param column string
 ---@return number
 function Builder:sum(column)
     assertId(column)
     local sql, params = self:_buildSQL(("SUM(%s) as val"):format(column))
     local rows = self:_cachedExecute(sql, params)
-    if rows[1] then return rows[1].val or 0 end
+    if rows[1] then return tonumber(rows[1].val) or 0 end
     return 0
 end
 
---- Execute an AVG query.
+--- MySQL may return strings for aggregate results via the text protocol;
+--- tonumber() ensures we always return a Lua number.
 ---@param column string
 ---@return number
 function Builder:avg(column)
     assertId(column)
     local sql, params = self:_buildSQL(("AVG(%s) as val"):format(column))
     local rows = self:_cachedExecute(sql, params)
-    if rows[1] then return rows[1].val or 0 end
+    if rows[1] then return tonumber(rows[1].val) or 0 end
     return 0
 end
 
---- Execute a MIN query.
+--- MySQL may return strings for aggregate results via the text protocol;
+--- tonumber() ensures we return a Lua number when possible.
 ---@param column string
 ---@return any
 function Builder:min(column)
     assertId(column)
     local sql, params = self:_buildSQL(("MIN(%s) as val"):format(column))
     local rows = self:_cachedExecute(sql, params)
-    if rows[1] then return rows[1].val end
+    if rows[1] then return tonumber(rows[1].val) or rows[1].val end
     return nil
 end
 
---- Execute a MAX query.
+--- MySQL may return strings for aggregate results via the text protocol;
+--- tonumber() ensures we return a Lua number when possible.
 ---@param column string
 ---@return any
 function Builder:max(column)
     assertId(column)
     local sql, params = self:_buildSQL(("MAX(%s) as val"):format(column))
     local rows = self:_cachedExecute(sql, params)
-    if rows[1] then return rows[1].val end
+    if rows[1] then return tonumber(rows[1].val) or rows[1].val end
     return nil
 end
 
---- Return an array of values for a single column.
 ---@param column string
 ---@return any[]
 function Builder:pluck(column)
@@ -669,19 +639,16 @@ function Builder:pluck(column)
     return values
 end
 
---- Check if any rows match the query. Returns true/false without fetching data.
 ---@return boolean
 function Builder:exists()
     local sql, params = self:_buildSQL("1")
-    -- Add LIMIT 1 for perf
     sql = sql .. " LIMIT 1"
     local rows = self:_cachedExecute(sql, params)
     return #rows > 0
 end
 
---- Process results in chunks to avoid memory spikes on large datasets.
----@param size integer  Chunk size
----@param callback fun(rows: OrvexInstance[], chunkIndex: integer): boolean?  Return false to stop
+---@param size integer
+---@param callback fun(rows: OrvexInstance[], chunkIndex: integer): boolean?
 function Builder:chunk(size, callback)
     assert(size > 0, "chunk size must be > 0")
     local chunkIndex = 0
@@ -703,24 +670,21 @@ function Builder:chunk(size, callback)
     end
 end
 
---- Paginate results: returns { data, total, page, perPage, lastPage }.
----@param page integer  Page number (1-based)
----@param perPage? integer  Items per page (default 15)
----@return table { data: OrvexInstance[], total: integer, page: integer, perPage: integer, lastPage: integer }
+---@param page integer
+---@param perPage? integer
+---@return table
 function Builder:paginate(page, perPage)
     page = page or 1
     perPage = perPage or 15
     assert(page >= 1, "Page must be >= 1")
     assert(perPage >= 1, "perPage must be >= 1")
 
-    -- Count total (clone wheres, no limit/offset/order)
     local countBuilder = Builder.new(self._table, self._adapter, nil, self._cache)
     countBuilder._wheres = self._wheres
     countBuilder._joins = self._joins
     countBuilder._distinct = self._distinct
     local total = countBuilder:count()
 
-    -- Fetch page
     self._limit = perPage
     self._offset = (page - 1) * perPage
     local data = self:get()
@@ -737,8 +701,7 @@ function Builder:paginate(page, perPage)
     }
 end
 
---- Execute a WHERE EXISTS (subquery) condition — used for whereHas.
----@param subSQL string  Raw SQL subquery
+---@param subSQL string
 ---@param subParams? any[]
 ---@return OrvexBuilder
 function Builder:whereExists(subSQL, subParams)
@@ -749,7 +712,6 @@ function Builder:whereExists(subSQL, subParams)
     return self
 end
 
---- Return the raw SQL and params without executing.
 ---@return string sql
 ---@return any[] params
 function Builder:toSQL()

@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Update version in fxmanifest.lua
+        run: sed -i "s/version '.*'/version '${{ steps.version.outputs.VERSION }}'/" fxmanifest.lua
+
+      - name: Package release
+        run: |
+          mkdir -p release/orvexorm
+          cp -r core/ database/ utils/ lib/ release/orvexorm/
+          cp fxmanifest.lua release/orvexorm/
+          cd release && zip -r ../orvexorm-${{ steps.version.outputs.VERSION }}.zip orvexorm/
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            CHANGES=$(git log --pretty=format:"- %s" HEAD)
+          else
+            CHANGES=$(git log --pretty=format:"- %s" ${PREV_TAG}..HEAD)
+          fi
+          echo "CHANGES<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: orvexorm-${{ steps.version.outputs.VERSION }}.zip
+          body: |
+            ## OrvexORM v${{ steps.version.outputs.VERSION }}
+
+            ### Installation
+            1. Telecharge `orvexorm-${{ steps.version.outputs.VERSION }}.zip`
+            2. Extrait dans `resources/` de ton serveur FiveM
+            3. `ensure orvexorm` dans ton `server.cfg`
+
+            ### Changements
+            ${{ steps.changelog.outputs.CHANGES }}
+          draft: false
+          prerelease: false

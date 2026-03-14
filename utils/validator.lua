@@ -1,13 +1,10 @@
 -- utils/validator.lua
--- Validates field values against the types declared in a schema.
--- Performance-optimized: direct type() comparison, no function call overhead.
 
 local type = type
 
 ---@class OrvexValidator
 local Validator = {}
 
---- Maps schema type names -> Lua type() strings.
 ---@type table<OrvexFieldType, string>
 local TYPE_MAP = {
     string    = "string",
@@ -19,7 +16,6 @@ local TYPE_MAP = {
     timestamp = "string",
 }
 
---- Validate a single field value against its declared type.
 ---@param field string
 ---@param value any
 ---@param fieldType OrvexFieldType
@@ -35,7 +31,6 @@ function Validator.checkType(field, value, fieldType)
     return true
 end
 
---- Validate a full data table against a schema.
 --- Only validates fields present in data (fast path).
 ---@param data table
 ---@param fields table<string, OrvexFieldType>

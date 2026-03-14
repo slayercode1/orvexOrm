@@ -168,10 +168,6 @@ require('lspconfig').lua_ls.setup({
 
 ---
 
-## If you use the source code
+## Source distribution
 
-If you installed OrvexORM with `--source` or have the source code directly, auto-completion works natively because LuaLS reads the annotations in `.lua` files.
-
-:::info Compiled version (.luac)
-`.luac` files (bytecode) don't contain annotations. For auto-completion with the compiled version, you need to add the OrvexORM **source code** folder to `workspace.library` in your `.luarc.json`, even if you use the compiled version in production.
-:::
+OrvexORM is distributed as source `.lua` files with complete LuaLS annotations. Auto-completion works natively — just add the OrvexORM folder to `workspace.library` in your `.luarc.json`.

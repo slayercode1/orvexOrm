@@ -17,45 +17,22 @@ OrvexORM detecte automatiquement quelle librairie MySQL est installee sur ton se
 
 ---
 
-## Methode 1 : CLI (recommandee)
+## Methode 1 : GitHub Release (recommandee)
 
-Installe OrvexORM en une seule commande depuis la racine de ton serveur FiveM :
-
-```bash
-npx orvexorm install
-```
-
-C'est tout. Le CLI detecte automatiquement ton dossier `resources/` et y installe OrvexORM sous forme **compilee** (bytecode `.luac`). Le code source n'est pas inclus.
-
-:::tip Commandes disponibles
-```bash
-npx orvexorm install              # Installe OrvexORM (compile .luac)
-npx orvexorm update               # Met a jour OrvexORM
-npx orvexorm init ma-ressource    # Cree une ressource pre-configuree
-npx orvexorm help                 # Aide
-```
-:::
-
----
-
-## Methode 2 : Telecharger manuellement
-
-Telecharge la derniere release et place le dossier dans `resources/` :
+1. Telecharge la derniere release sur [GitHub Releases](https://github.com/slayercode1/orvexOrm/releases)
+2. Extrait le dossier `orvexorm` dans ton dossier `resources/`
+3. C'est tout !
 
 ```
 ton-serveur/
 └── resources/
     └── orvexorm/
-        ├── core/*.luac
-        ├── database/*.luac
-        ├── utils/*.luac
-        ├── lib/
+        ├── core/*.lua
+        ├── database/*.lua
+        ├── utils/*.lua
+        ├── lib/*.lua
         └── fxmanifest.lua
 ```
-
-:::info Distribution compilee
-La release contient des fichiers `.luac` (bytecode Lua 5.4). C'est le format recommande — leger, rapide, et le code source n'est pas lisible.
-:::
 
 ---
 
@@ -77,13 +54,7 @@ Ta librairie MySQL (`oxmysql` ou `mysql-async`) doit **toujours** etre demarree 
 
 ## Utiliser dans ta ressource
 
-Tu peux aussi generer une ressource pre-configuree avec le CLI :
-
-```bash
-npx orvexorm init ma-ressource
-```
-
-Ou configurer manuellement :
+Configure ta ressource pour utiliser OrvexORM :
 
 **Option A : Import direct (recommandee)**
 
@@ -98,6 +69,10 @@ server_scripts {
     'server.lua',
 }
 ```
+
+:::tip Migrations et schema
+Pour utiliser les migrations ou les fonctionnalites de schema, utilise le pattern d'import complet `@orvexorm/` dans ton `fxmanifest.lua`. Toutes les fonctionnalites (migrations, schema builder, introspection) sont disponibles via l'import direct.
+:::
 
 ```lua title="ta-ressource/server.lua"
 -- OrvexORM est disponible globalement

@@ -1,10 +1,5 @@
 -- core/migration.lua
 -- Migration system for creating and managing database tables.
---
--- Supports:
---   - Automatic table creation from model schemas (Model.sync())
---   - Named migrations with up/down support
---   - Migration tracking via a migrations table
 
 local Helpers = OrvexHelpers or require("utils.helpers")
 
@@ -26,14 +21,12 @@ local Helpers = OrvexHelpers or require("utils.helpers")
 local SchemaBuilder = {}
 SchemaBuilder.__index = SchemaBuilder
 
--- Forward declaration (defined below)
 local TableBuilder
 
 ---@class OrvexColumnSQL
 ---@field name string
 ---@field sql string
 
---- Type mapping from OrvexFieldType to MySQL column type.
 ---@type table<string, string>
 local TYPE_MAP = {
     string    = "VARCHAR(255)",
@@ -46,11 +39,10 @@ local TYPE_MAP = {
     timestamp = "TIMESTAMP",
 }
 
---- Convert an OrvexFieldType or extended column definition to a MySQL column SQL fragment.
----@param name string              Column name
----@param def string|OrvexColumnDef  Field type string or extended definition
----@param isPrimaryKey? boolean    Whether this column is the primary key
----@return string sql              e.g. "`name` VARCHAR(60) NOT NULL DEFAULT 'value'"
+---@param name string
+---@param def string|OrvexColumnDef
+---@param isPrimaryKey? boolean
+---@return string sql
 local function columnToSQL(name, def, isPrimaryKey)
     local colType, nullable, default, unique, autoIncrement, unsigned
 
@@ -122,33 +114,35 @@ function SchemaBuilder.new()
         _dropColumns   = {},
         _renames       = {},
         _rawStatements = {},
+        _creates       = {},
     }, SchemaBuilder)
 end
 
---- Create a new table.
 ---@param tableName string
 ---@param callback fun(table: OrvexTableBuilder)
 function SchemaBuilder:create(tableName, callback)
-    self._tableName = tableName
     local tb = TableBuilder.new()
     callback(tb)
+    self._creates[#self._creates + 1] = {
+        tableName    = tableName,
+        columns      = tb._columns,
+        tableBuilder = tb,
+    }
+    self._tableName = tableName
     self._columns = tb._columns
     self._tableBuilder = tb
 end
 
---- Drop a table.
 ---@param tableName string
 function SchemaBuilder:drop(tableName)
     self._drops[#self._drops + 1] = tableName
 end
 
---- Drop a table if it exists.
 ---@param tableName string
 function SchemaBuilder:dropIfExists(tableName)
     self._rawStatements[#self._rawStatements + 1] = ("DROP TABLE IF EXISTS `%s`"):format(tableName)
 end
 
---- Add columns to an existing table.
 ---@param tableName string
 ---@param callback fun(table: OrvexTableBuilder)
 function SchemaBuilder:table(tableName, callback)
@@ -160,58 +154,60 @@ function SchemaBuilder:table(tableName, callback)
     self._renames = tb._renames or {}
 end
 
---- Add a raw SQL statement.
 ---@param sql string
 function SchemaBuilder:raw(sql)
     self._rawStatements[#self._rawStatements + 1] = sql
 end
 
---- Convert to SQL statements.
+---@param createOp table
+---@return string sql
+local function buildCreateTableSQL(createOp)
+    local colParts = {}
+    local pkName = nil
+    for _, col in ipairs(createOp.columns) do
+        colParts[#colParts + 1] = "  " .. col.sql
+        if col.primary then
+            pkName = col.name
+        end
+    end
+    if pkName then
+        colParts[#colParts + 1] = ("  PRIMARY KEY (`%s`)"):format(pkName)
+    end
+    local tb = createOp.tableBuilder
+    if tb then
+        for _, idx in ipairs(tb._indexes) do
+            local cols = {}
+            for _, c in ipairs(idx.columns) do cols[#cols + 1] = "`" .. c .. "`" end
+            local colStr = table.concat(cols, ", ")
+            if idx.unique then
+                colParts[#colParts + 1] = ("  UNIQUE KEY `%s` (%s)"):format(idx.name, colStr)
+            else
+                colParts[#colParts + 1] = ("  KEY `%s` (%s)"):format(idx.name, colStr)
+            end
+        end
+        for _, fk in ipairs(tb._foreignKeys) do
+            local fkName = ("fk_%s_%s"):format(createOp.tableName, fk.column)
+            colParts[#colParts + 1] = ("  CONSTRAINT `%s` FOREIGN KEY (`%s`) REFERENCES `%s` (`%s`) ON DELETE %s ON UPDATE %s"):format(
+                fkName, fk.column, fk.refTable, fk.refColumn, fk.onDelete, fk.onUpdate
+            )
+        end
+    end
+    return ("CREATE TABLE IF NOT EXISTS `%s` (\n%s\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"):format(
+        createOp.tableName, table.concat(colParts, ",\n")
+    )
+end
+
 ---@return string[]
 function SchemaBuilder:toSQL()
     local statements = {}
 
-    -- CREATE TABLE
-    if self._tableName and #self._columns > 0 then
-        local colParts = {}
-        local pkName = nil
-        for _, col in ipairs(self._columns) do
-            colParts[#colParts + 1] = "  " .. col.sql
-            if col.primary then
-                pkName = col.name
-            end
+    if #self._creates > 0 then
+        for _, createOp in ipairs(self._creates) do
+            statements[#statements + 1] = buildCreateTableSQL(createOp)
         end
-        if pkName then
-            colParts[#colParts + 1] = ("  PRIMARY KEY (`%s`)"):format(pkName)
-        end
-        -- Inline indexes
-        local tb = self._tableBuilder
-        if tb then
-            for _, idx in ipairs(tb._indexes) do
-                local cols = {}
-                for _, c in ipairs(idx.columns) do cols[#cols + 1] = "`" .. c .. "`" end
-                local colStr = table.concat(cols, ", ")
-                if idx.unique then
-                    colParts[#colParts + 1] = ("  UNIQUE KEY `%s` (%s)"):format(idx.name, colStr)
-                else
-                    colParts[#colParts + 1] = ("  KEY `%s` (%s)"):format(idx.name, colStr)
-                end
-            end
-            for _, fk in ipairs(tb._foreignKeys) do
-                local fkName = ("fk_%s_%s"):format(self._tableName, fk.column)
-                colParts[#colParts + 1] = ("  CONSTRAINT `%s` FOREIGN KEY (`%s`) REFERENCES `%s` (`%s`) ON DELETE %s ON UPDATE %s"):format(
-                    fkName, fk.column, fk.refTable, fk.refColumn, fk.onDelete, fk.onUpdate
-                )
-            end
-        end
-        local sql = ("CREATE TABLE IF NOT EXISTS `%s` (\n%s\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"):format(
-            self._tableName, table.concat(colParts, ",\n")
-        )
-        statements[#statements + 1] = sql
     end
 
-    -- ALTER TABLE (add columns)
-    if self._tableName and #self._addColumns > 0 and #self._columns == 0 then
+    if self._tableName and #self._addColumns > 0 and #self._creates == 0 then
         for _, col in ipairs(self._addColumns) do
             statements[#statements + 1] = ("ALTER TABLE `%s` ADD COLUMN %s"):format(
                 self._tableName, col.sql
@@ -219,7 +215,6 @@ function SchemaBuilder:toSQL()
         end
     end
 
-    -- ALTER TABLE (drop columns)
     if self._tableName and self._dropColumns then
         for _, colName in ipairs(self._dropColumns) do
             statements[#statements + 1] = ("ALTER TABLE `%s` DROP COLUMN `%s`"):format(
@@ -228,7 +223,6 @@ function SchemaBuilder:toSQL()
         end
     end
 
-    -- ALTER TABLE (rename columns)
     if self._tableName and self._renames then
         for _, r in ipairs(self._renames) do
             statements[#statements + 1] = ("ALTER TABLE `%s` RENAME COLUMN `%s` TO `%s`"):format(
@@ -237,12 +231,10 @@ function SchemaBuilder:toSQL()
         end
     end
 
-    -- DROP TABLE
     for _, tableName in ipairs(self._drops) do
         statements[#statements + 1] = ("DROP TABLE `%s`"):format(tableName)
     end
 
-    -- Raw statements
     for _, sql in ipairs(self._rawStatements) do
         statements[#statements + 1] = sql
     end
@@ -271,9 +263,8 @@ function TableBuilder.new()
     }, TableBuilder)
 end
 
---- Add a string (VARCHAR) column.
 ---@param name string
----@param length? number  Default 255
+---@param length? number
 ---@return OrvexTableBuilder
 function TableBuilder:string(name, length)
     local colType = length and ("VARCHAR(%d)"):format(length) or "VARCHAR(255)"
@@ -284,7 +275,6 @@ function TableBuilder:string(name, length)
     return self
 end
 
---- Add an integer column.
 ---@param name string
 ---@return OrvexTableBuilder
 function TableBuilder:integer(name)
@@ -295,7 +285,6 @@ function TableBuilder:integer(name)
     return self
 end
 
---- Add a BIGINT column.
 ---@param name string
 ---@return OrvexTableBuilder
 function TableBuilder:bigInteger(name)
@@ -306,7 +295,6 @@ function TableBuilder:bigInteger(name)
     return self
 end
 
---- Add a TINYINT(1) boolean column.
 ---@param name string
 ---@return OrvexTableBuilder
 function TableBuilder:boolean(name)
@@ -317,7 +305,6 @@ function TableBuilder:boolean(name)
     return self
 end
 
---- Add a TEXT column.
 ---@param name string
 ---@return OrvexTableBuilder
 function TableBuilder:text(name)
@@ -328,7 +315,6 @@ function TableBuilder:text(name)
     return self
 end
 
---- Add a JSON column.
 ---@param name string
 ---@return OrvexTableBuilder
 function TableBuilder:json(name)
@@ -339,7 +325,6 @@ function TableBuilder:json(name)
     return self
 end
 
---- Add a FLOAT column.
 ---@param name string
 ---@return OrvexTableBuilder
 function TableBuilder:float(name)
@@ -350,7 +335,6 @@ function TableBuilder:float(name)
     return self
 end
 
---- Add a DOUBLE column.
 ---@param name string
 ---@return OrvexTableBuilder
 function TableBuilder:double(name)
@@ -361,7 +345,6 @@ function TableBuilder:double(name)
     return self
 end
 
---- Add a DATE column.
 ---@param name string
 ---@return OrvexTableBuilder
 function TableBuilder:date(name)
@@ -372,7 +355,6 @@ function TableBuilder:date(name)
     return self
 end
 
---- Add a DATETIME column.
 ---@param name string
 ---@return OrvexTableBuilder
 function TableBuilder:datetime(name)
@@ -383,7 +365,6 @@ function TableBuilder:datetime(name)
     return self
 end
 
---- Add a TIMESTAMP column.
 ---@param name string
 ---@return OrvexTableBuilder
 function TableBuilder:timestamp(name)
@@ -394,8 +375,7 @@ function TableBuilder:timestamp(name)
     return self
 end
 
---- Add an auto-increment primary key column.
----@param name? string  Default "id"
+---@param name? string
 ---@return OrvexTableBuilder
 function TableBuilder:id(name)
     name = name or "id"
@@ -407,9 +387,8 @@ function TableBuilder:id(name)
     return self
 end
 
---- Add a string primary key column (for identifiers).
 ---@param name string
----@param length? number  Default 60
+---@param length? number
 ---@return OrvexTableBuilder
 function TableBuilder:primaryString(name, length)
     length = length or 60
@@ -421,9 +400,8 @@ function TableBuilder:primaryString(name, length)
     return self
 end
 
---- Add an ENUM column.
 ---@param name string
----@param values string[]  e.g. {"active", "banned", "suspended"}
+---@param values string[]
 ---@return OrvexTableBuilder
 function TableBuilder:enum(name, values)
     local quoted = {}
@@ -437,7 +415,6 @@ function TableBuilder:enum(name, values)
     return self
 end
 
---- Add soft delete support (deleted_at column).
 ---@return OrvexTableBuilder
 function TableBuilder:softDeletes()
     self._columns[#self._columns + 1] = {
@@ -447,7 +424,6 @@ function TableBuilder:softDeletes()
     return self
 end
 
---- Add created_at and updated_at timestamp columns.
 ---@return OrvexTableBuilder
 function TableBuilder:timestamps()
     self._columns[#self._columns + 1] = {
@@ -461,8 +437,7 @@ function TableBuilder:timestamps()
     return self
 end
 
---- Add a UNIQUE constraint on one or more columns.
----@param columns string|string[]  Column name or list of column names
+---@param columns string|string[]
 ---@param indexName? string
 ---@return OrvexTableBuilder
 function TableBuilder:unique(columns, indexName)
@@ -476,7 +451,6 @@ function TableBuilder:unique(columns, indexName)
     return self
 end
 
---- Add an INDEX on one or more columns.
 ---@param columns string|string[]
 ---@param indexName? string
 ---@return OrvexTableBuilder
@@ -491,10 +465,9 @@ function TableBuilder:index(columns, indexName)
     return self
 end
 
---- Add a FOREIGN KEY constraint.
----@param column string       Local column
----@param refTable string     Referenced table
----@param refColumn string    Referenced column
+---@param column string
+---@param refTable string
+---@param refColumn string
 ---@param opts? { onDelete?: string, onUpdate?: string }
 ---@return OrvexTableBuilder
 function TableBuilder:foreignKey(column, refTable, refColumn, opts)
@@ -514,7 +487,6 @@ function TableBuilder:foreignKey(column, refTable, refColumn, opts)
     return self
 end
 
---- Mark that a column should be dropped (for use in :table() alter mode).
 ---@param name string
 ---@return OrvexTableBuilder
 function TableBuilder:dropColumn(name)
@@ -522,7 +494,6 @@ function TableBuilder:dropColumn(name)
     return self
 end
 
---- Rename a column.
 ---@param from string
 ---@param to string
 ---@return OrvexTableBuilder
@@ -536,10 +507,8 @@ end
 ---@class OrvexMigrationRunner
 local Migration = {}
 
---- The tracking table name for applied migrations.
 Migration.TRACKING_TABLE = "orvex_migrations"
 
---- Generate CREATE TABLE SQL from a model's schema and primaryKey.
 ---@param tableName string
 ---@param fields table<string, OrvexFieldType|OrvexColumnDef>
 ---@param primaryKey string
@@ -561,7 +530,6 @@ function Migration.generateCreateSQL(tableName, fields, primaryKey)
     )
 end
 
---- Ensure the migrations tracking table exists.
 ---@param adapter OrvexAdapter
 function Migration.ensureTrackingTable(adapter)
     local sql = [[CREATE TABLE IF NOT EXISTS `orvex_migrations` (
@@ -575,7 +543,6 @@ function Migration.ensureTrackingTable(adapter)
     adapter:scalar(sql, {})
 end
 
---- Get all applied migration names.
 ---@param adapter OrvexAdapter
 ---@return table<string, boolean>
 function Migration.getApplied(adapter)
@@ -589,7 +556,6 @@ function Migration.getApplied(adapter)
     return applied
 end
 
---- Get the current batch number.
 ---@param adapter OrvexAdapter
 ---@return number
 function Migration.getCurrentBatch(adapter)
@@ -600,10 +566,9 @@ function Migration.getCurrentBatch(adapter)
     return 0
 end
 
---- Run pending migrations.
 ---@param migrations OrvexMigration[]
 ---@param adapter OrvexAdapter
----@return number count  Number of migrations applied
+---@return number count
 function Migration.migrate(migrations, adapter)
     Migration.ensureTrackingTable(adapter)
     local applied = Migration.getApplied(adapter)
@@ -629,10 +594,9 @@ function Migration.migrate(migrations, adapter)
     return count
 end
 
---- Rollback the last batch of migrations.
 ---@param migrations OrvexMigration[]
 ---@param adapter OrvexAdapter
----@return number count  Number of migrations rolled back
+---@return number count
 function Migration.rollback(migrations, adapter)
     Migration.ensureTrackingTable(adapter)
     local batch = Migration.getCurrentBatch(adapter)
@@ -644,7 +608,6 @@ function Migration.rollback(migrations, adapter)
     )
     if not rows or #rows == 0 then return 0 end
 
-    -- Build lookup for migration definitions
     local migByName = {}
     for _, mig in ipairs(migrations) do
         migByName[mig.name] = mig
@@ -668,7 +631,6 @@ function Migration.rollback(migrations, adapter)
     return count
 end
 
---- Sync a model's table (create if not exists).
 ---@param tableName string
 ---@param fields table<string, OrvexFieldType|OrvexColumnDef>
 ---@param primaryKey string
@@ -678,7 +640,6 @@ function Migration.sync(tableName, fields, primaryKey, adapter)
     adapter:scalar(sql, {})
 end
 
--- Expose internals for testing
 Migration.columnToSQL    = columnToSQL
 Migration.SchemaBuilder  = SchemaBuilder
 Migration.TableBuilder   = TableBuilder

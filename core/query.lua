@@ -1,7 +1,6 @@
 -- core/query.lua
--- Pure SQL query builder.  Returns { sql = "...", params = { ... } }.
--- Every function is stateless — no side-effects, no database calls.
--- Performance-optimized: cached placeholders, reduced allocations.
+-- Pure SQL query builder. Returns { sql = "...", params = { ... } }.
+-- Every function is stateless -- no side-effects, no database calls.
 
 local Helpers = OrvexHelpers or require("utils.helpers")
 
@@ -10,7 +9,6 @@ local sortedKeys = Helpers.sortedKeys
 local placeholders = Helpers.placeholders
 local table_concat = table.concat
 
---- Validate all keys in a table as safe SQL identifiers.
 ---@param keys string[]
 local function validateKeys(keys)
     for _, k in ipairs(keys) do
@@ -25,7 +23,6 @@ end
 ---@class OrvexQuery
 local Query = {}
 
---- Build an INSERT query.
 ---@param table_name string
 ---@param data table<string, any>
 ---@return OrvexQueryResult
@@ -48,7 +45,6 @@ function Query.insert(table_name, data)
     }
 end
 
---- Build a batch INSERT query (multiple rows).
 ---@param table_name string
 ---@param rows table[]
 ---@return OrvexQueryResult
@@ -78,7 +74,6 @@ function Query.insertMany(table_name, rows)
     }
 end
 
---- Build a SELECT query.
 ---@param table_name string
 ---@param where table<string, any>
 ---@param columns? string
@@ -106,7 +101,6 @@ function Query.select(table_name, where, columns)
     }
 end
 
---- Build an UPDATE query.
 ---@param table_name string
 ---@param data table<string, any>
 ---@param where table<string, any>
@@ -140,7 +134,6 @@ function Query.update(table_name, data, where)
     }
 end
 
---- Build a DELETE query.
 ---@param table_name string
 ---@param where table<string, any>
 ---@return OrvexQueryResult
@@ -163,7 +156,6 @@ function Query.delete(table_name, where)
     }
 end
 
---- Build an UPSERT query.
 ---@param table_name string
 ---@param data table<string, any>
 ---@param updateFields? table<string, any>
@@ -194,7 +186,6 @@ function Query.upsert(table_name, data, updateFields)
     }
 end
 
---- Build a SELECT with INNER JOIN (belongsToMany pivot).
 ---@param relatedTable string
 ---@param pivotTable string
 ---@param pivotOtherKey string
@@ -217,10 +208,9 @@ function Query.selectJoin(relatedTable, pivotTable, pivotOtherKey, relatedPK, pi
     }
 end
 
---- Build an INCREMENT or DECREMENT query.
 ---@param table_name string
 ---@param column string
----@param op string  "+" or "-"
+---@param op string
 ---@param amount number
 ---@param where table<string, any>
 ---@return OrvexQueryResult

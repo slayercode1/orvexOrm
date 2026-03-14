@@ -4,7 +4,7 @@ services:
     container_name: orvexorm-docs
     restart: unless-stopped
     environment:
-      - DOMAIN=orvexorm.dev
+      - DOMAIN=orvexorm.yann-dev.fr
     networks:
       - caddy-net
 

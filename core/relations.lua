@@ -1,5 +1,4 @@
 -- core/relations.lua
--- Defines and resolves relations between models.
 
 local Query = OrvexQuery or require("core.query")
 
@@ -24,7 +23,6 @@ Relations.BELONGS_TO_MANY  = "belongsToMany"
 
 -- ─── Fetchers ──────────────────────────────────────────────────────
 
---- Fetch a hasOne related instance.
 ---@param instance OrvexInstance
 ---@param rel OrvexRelationDef
 ---@return OrvexInstance|nil
@@ -32,7 +30,6 @@ function Relations.fetchHasOne(instance, rel)
     return rel.model.find({ [rel.foreignKey] = instance[rel.localKey] })
 end
 
---- Fetch all hasMany related instances.
 ---@param instance OrvexInstance
 ---@param rel OrvexRelationDef
 ---@return OrvexInstance[]
@@ -40,7 +37,6 @@ function Relations.fetchHasMany(instance, rel)
     return rel.model.findAll({ [rel.foreignKey] = instance[rel.localKey] })
 end
 
---- Fetch the parent (belongsTo) instance.
 ---@param instance OrvexInstance
 ---@param rel OrvexRelationDef
 ---@return OrvexInstance|nil
@@ -48,7 +44,6 @@ function Relations.fetchBelongsTo(instance, rel)
     return rel.model.find({ [rel.ownerKey] = instance[rel.foreignKey] })
 end
 
---- Fetch all belongsToMany related instances via a pivot table JOIN.
 ---@param instance OrvexInstance
 ---@param rel OrvexRelationDef
 ---@return OrvexInstance[]
@@ -73,7 +68,6 @@ end
 
 -- ─── Pivot helpers ─────────────────────────────────────────────────
 
---- Attach a related instance through the pivot table.
 ---@param instance OrvexInstance
 ---@param rel OrvexRelationDef
 ---@param relatedInstance OrvexInstance
@@ -88,7 +82,6 @@ function Relations.attach(instance, rel, relatedInstance)
     return true
 end
 
---- Detach a related instance from the pivot table.
 ---@param instance OrvexInstance
 ---@param rel OrvexRelationDef
 ---@param relatedInstance OrvexInstance

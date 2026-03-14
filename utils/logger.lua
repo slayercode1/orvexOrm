@@ -1,20 +1,15 @@
 -- utils/logger.lua
--- Simple debug logger for SQL queries.
--- Performance-optimized: zero overhead when disabled.
 
 ---@class OrvexLogger
 local Logger = {}
 
---- Global debug flag.
 Logger._enabled = false
 
---- Enable or disable debug logging.
 ---@param enabled boolean
 function Logger.setEnabled(enabled)
     Logger._enabled = enabled
 end
 
---- Log a SQL query if debug mode is on.
 ---@param sql string
 ---@param params? any[]
 function Logger.query(sql, params)
@@ -30,7 +25,6 @@ function Logger.query(sql, params)
     end
 end
 
---- Log a message if debug mode is on.
 ---@param msg string
 function Logger.info(msg)
     if not Logger._enabled then return end

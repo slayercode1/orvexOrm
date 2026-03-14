@@ -54,6 +54,11 @@ json = {
     end,
 }
 
+-- Mock FiveM exports (empty, driver will fallback to MySQL global)
+exports = setmetatable({}, {
+    __index = function() return nil end,
+})
+
 local _db_log = {}
 local _mock_results = {}
 local _tx_log = {}
@@ -68,23 +73,55 @@ promise = {
 
 Citizen = { Await = function(p) return p._value end }
 
+-- Mock MySQL driver callback
+local function _mock_cb(query, params, cb)
+    _db_log[#_db_log + 1] = { sql = query, params = params }
+    local result = _mock_results[#_db_log]
+    if result then
+        cb(result)
+    else
+        if query:match("^INSERT") then cb(1)
+        elseif query:match("^SELECT") then cb({})
+        elseif query:match("^CREATE") then cb(1)
+        else cb(1) end
+    end
+end
+
 MySQL = {
     prepare = function(query, params, cb)
-        _db_log[#_db_log + 1] = { sql = query, params = params }
-        local result = _mock_results[#_db_log]
-        if result then
-            cb(result)
-        else
-            if query:match("^INSERT") then cb(1)
-            elseif query:match("^SELECT") then cb({})
-            else cb(1) end
-        end
+        _mock_cb(query, params, cb)
     end,
+    Async = {
+        fetchAll = function(query, params, cb)
+            _mock_cb(query, params, cb)
+        end,
+        execute = function(query, params, cb)
+            _mock_cb(query, params, cb)
+        end,
+        transaction = function(queries, cb)
+            _tx_log[#_tx_log + 1] = queries
+            cb(true)
+        end,
+    },
     transaction = function(queries, cb)
         _tx_log[#_tx_log + 1] = queries
         cb(true)
     end,
 }
+
+-- Mock FiveM exports (for oxmysql auto-detection)
+exports = setmetatable({}, {
+    __call = function(_, name, fn)
+        -- store export
+    end,
+    __index = function(_, name)
+        return setmetatable({}, {
+            __index = function(_, method)
+                return function() return nil end
+            end,
+        })
+    end,
+})
 
 -- ─── Test helpers ──────────────────────────────────────────────────
 
@@ -1677,6 +1714,156 @@ assert_match(_db_log[1].sql, "money = %?", "updateWhere: sets money")
 reset()
 User.deleteWhere({ identifier = "license:dw" })
 assert_match(_db_log[1].sql, "DELETE", "deleteWhere: runs DELETE")
+
+-- ─── Test: SchemaBuilder multiple create() ──────────────────────────
+
+print("\n== SchemaBuilder multiple create() ==")
+
+do
+    local sb = MigrationLib.SchemaBuilder.new()
+    sb:create("table_alpha", function(t)
+        t:id()
+        t:string("name")
+    end)
+    sb:create("table_beta", function(t)
+        t:id()
+        t:integer("score")
+    end)
+    local stmts = sb:toSQL()
+    assert_eq(#stmts, 2, "multi-create: generates 2 statements")
+    assert_match(stmts[1], "table_alpha", "multi-create: first statement is table_alpha")
+    assert_match(stmts[2], "table_beta", "multi-create: second statement is table_beta")
+    assert_match(stmts[1], "CREATE TABLE", "multi-create: first is CREATE TABLE")
+    assert_match(stmts[2], "CREATE TABLE", "multi-create: second is CREATE TABLE")
+    assert_match(stmts[1], "`name`", "multi-create: first has name column")
+    assert_match(stmts[2], "`score`", "multi-create: second has score column")
+end
+
+-- ─── Test: Date types in serializer ──────────────────────────────────
+
+print("\n== Date types in serializer ==")
+
+do
+    local Ser = OrvexSerializer
+
+    -- date: 806716800 is a Unix timestamp
+    local dateResult = Ser.decode(806716800, "date")
+    assert_eq(type(dateResult), "string", "date decode: returns a string")
+    assert_match(dateResult, "^%d%d%d%d%-%d%d%-%d%d$", "date decode: format YYYY-MM-DD")
+
+    -- datetime: 1710000000 is a Unix timestamp
+    local dtResult = Ser.decode(1710000000, "datetime")
+    assert_eq(type(dtResult), "string", "datetime decode: returns a string")
+    assert_match(dtResult, "^%d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%d$", "datetime decode: format YYYY-MM-DD HH:MM:SS")
+
+    -- timestamp type also converts
+    local tsResult = Ser.decode(1710000000, "timestamp")
+    assert_eq(type(tsResult), "string", "timestamp decode: returns a string")
+    assert_match(tsResult, "^%d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%d$", "timestamp decode: format YYYY-MM-DD HH:MM:SS")
+
+    -- string values pass through unchanged
+    local strDate = Ser.decode("2024-01-15", "date")
+    assert_eq(strDate, "2024-01-15", "date decode: string passthrough unchanged")
+
+    -- nil passes through
+    local nilResult = Ser.decode(nil, "date")
+    assert_eq(nilResult, nil, "date decode: nil returns nil")
+end
+
+-- ─── Test: sync() with timestamps ────────────────────────────────────
+
+print("\n== sync() with timestamps ==")
+
+do
+    reset()
+    local TsModel = ORM.model("ts_users", {
+        id   = "number",
+        name = "string",
+    }, { timestamps = true })
+
+    TsModel.sync()
+    local syncSQL = _db_log[1].sql
+    assert_match(syncSQL, "CREATE TABLE", "sync timestamps: generates CREATE TABLE")
+    assert_match(syncSQL, "created_at", "sync timestamps: includes created_at")
+    assert_match(syncSQL, "updated_at", "sync timestamps: includes updated_at")
+    assert_match(syncSQL, "ts_users", "sync timestamps: correct table name")
+end
+
+-- ─── Test: sync() with softDelete ────────────────────────────────────
+
+print("\n== sync() with softDelete ==")
+
+do
+    reset()
+    local SdModel = ORM.model("sd_users", {
+        id   = "number",
+        name = "string",
+    }, { softDelete = true })
+
+    SdModel.sync()
+    local syncSQL = _db_log[1].sql
+    assert_match(syncSQL, "CREATE TABLE", "sync softDelete: generates CREATE TABLE")
+    assert_match(syncSQL, "deleted_at", "sync softDelete: includes deleted_at")
+    assert_match(syncSQL, "sd_users", "sync softDelete: correct table name")
+end
+
+-- ─── Test: sync() with both timestamps and softDelete ────────────────
+
+print("\n== sync() with timestamps + softDelete ==")
+
+do
+    reset()
+    local BothModel = ORM.model("both_users", {
+        id   = "number",
+        name = "string",
+    }, { timestamps = true, softDelete = true })
+
+    BothModel.sync()
+    local syncSQL = _db_log[1].sql
+    assert_match(syncSQL, "created_at", "sync both: includes created_at")
+    assert_match(syncSQL, "updated_at", "sync both: includes updated_at")
+    assert_match(syncSQL, "deleted_at", "sync both: includes deleted_at")
+end
+
+-- ─── Test: Builder aggregates return numbers ─────────────────────────
+
+print("\n== Builder aggregates return numbers ==")
+
+do
+    -- sum with string result
+    reset()
+    _mock_results[1] = { { val = "500" } }
+    local sumResult = User.query():sum("money")
+    assert_eq(type(sumResult), "number", "sum: returns number type")
+    assert_eq(sumResult, 500, "sum: value is 500")
+
+    -- avg with string result
+    reset()
+    _mock_results[1] = { { val = "250.5" } }
+    local avgResult = User.query():avg("money")
+    assert_eq(type(avgResult), "number", "avg: returns number type")
+    assert_eq(avgResult, 250.5, "avg: value is 250.5")
+
+    -- count with string result
+    reset()
+    _mock_results[1] = { { cnt = "42" } }
+    local countResult = User.query():count()
+    assert_eq(type(countResult), "number", "count: returns number type")
+    assert_eq(countResult, 42, "count: value is 42")
+
+    -- sum with actual number (should still work)
+    reset()
+    _mock_results[1] = { { val = 100 } }
+    local sumNum = User.query():sum("money")
+    assert_eq(type(sumNum), "number", "sum numeric: returns number type")
+    assert_eq(sumNum, 100, "sum numeric: value is 100")
+
+    -- sum with empty result
+    reset()
+    _mock_results[1] = {}
+    local sumEmpty = User.query():sum("money")
+    assert_eq(sumEmpty, 0, "sum empty: returns 0")
+end
 
 end -- end runExtendedTests
 

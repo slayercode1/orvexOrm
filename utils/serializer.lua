@@ -1,18 +1,14 @@
 -- utils/serializer.lua
--- Converts Lua tables <-> JSON strings for columns stored as JSON in MySQL.
--- Performance-optimized: uses byte checks instead of pattern matching.
 
 local type = type
 local string_byte = string.byte
 
--- Byte values for fast JSON detection
 local BYTE_LBRACE  = string_byte("{")
 local BYTE_LBRACKET = string_byte("[")
 
 ---@class OrvexSerializer
 local Serializer = {}
 
---- Check if a string looks like JSON (starts with { or [).
 ---@param s string
 ---@return boolean
 local function looksLikeJSON(s)
@@ -21,7 +17,6 @@ local function looksLikeJSON(s)
     return b == BYTE_LBRACE or b == BYTE_LBRACKET
 end
 
---- Encode a Lua value for database storage.
 ---@param value any
 ---@param fieldType? OrvexFieldType
 ---@return any
@@ -33,7 +28,8 @@ function Serializer.encode(value, fieldType)
     return value
 end
 
---- Decode a database value back into a Lua type.
+--- Note: oxmysql may return DATE/DATETIME/TIMESTAMP columns as Unix timestamp
+--- numbers instead of formatted strings.
 ---@param value any
 ---@param fieldType? OrvexFieldType
 ---@return any
@@ -45,6 +41,14 @@ function Serializer.decode(value, fieldType)
     if fieldType == "auto" and looksLikeJSON(value) then
         local ok, decoded = pcall(json.decode, value)
         if ok then return decoded end
+    end
+
+    if fieldType == "date" and type(value) == "number" then
+        return os.date("!%Y-%m-%d", value)
+    end
+
+    if (fieldType == "datetime" or fieldType == "timestamp") and type(value) == "number" then
+        return os.date("!%Y-%m-%d %H:%M:%S", value)
     end
 
     return value

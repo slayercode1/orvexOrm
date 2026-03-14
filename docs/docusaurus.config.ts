@@ -11,7 +11,7 @@ const config: Config = {
     v4: true,
   },
 
-  url: 'https://orvexorm.dev',
+  url: 'https://orvexorm.yann-dev.fr',
   baseUrl: '/',
 
   organizationName: 'orvex',
@@ -92,6 +92,11 @@ const config: Config = {
           type: 'localeDropdown',
           position: 'right',
         },
+        {
+          href: 'https://github.com/slayercode1/orvexOrm',
+          label: 'GitHub',
+          position: 'right',
+        },
       ],
     },
     footer: {
@@ -113,6 +118,7 @@ const config: Config = {
             { label: 'Query Builder', to: '/docs/guides/query-builder' },
             { label: 'Relations', to: '/docs/guides/relations' },
             { label: 'Migrations', to: '/docs/guides/migrations' },
+            { label: 'Studio', to: '/docs/guides/studio' },
           ],
         },
         {
