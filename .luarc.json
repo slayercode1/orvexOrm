@@ -1,0 +1,17 @@
+{
+    "runtime": {
+        "version": "Lua 5.3"
+    },
+    "workspace": {
+        "library": [],
+        "checkThirdParty": false
+    },
+    "diagnostics": {
+        "globals": ["MySQL", "Citizen", "promise", "json"],
+        "disable": ["lowercase-global"]
+    },
+    "completion": {
+        "callSnippet": "Replace",
+        "keywordSnippet": "Replace"
+    }
+}

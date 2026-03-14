@@ -1,0 +1,13 @@
+services:
+  orvexorm-docs:
+    build: .
+    container_name: orvexorm-docs
+    restart: unless-stopped
+    environment:
+      - DOMAIN=orvexorm.dev
+    networks:
+      - caddy-net
+
+networks:
+  caddy-net:
+    external: true

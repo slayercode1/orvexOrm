@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+docs/node_modules/
+
+# Build outputs
+docs/build/
+docs/.docusaurus/
+docs/.cache-loader/
+dist/
+cli/dist/
+
+# Compiled bytecode (distributed separately)
+*.luac
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment & secrets
+.env
+.env.*
+credentials.json
+
+# AI tools
+.claude/
+.cursor/
+.aider*
+.copilot/
+.codeium/
+.continue/
+CLAUDE.md
+
+# Logs
+*.log
+npm-debug.log*
+
+# Docker
+docs/.dockerignore
+
+# Misc
+*.bak
+*.tmp

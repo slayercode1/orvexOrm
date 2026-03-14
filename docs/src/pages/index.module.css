@@ -1,0 +1,228 @@
+.heroBanner {
+  padding: 5rem 0 4rem;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+
+@media screen and (max-width: 996px) {
+  .heroBanner {
+    padding: 3rem 1.5rem 2.5rem;
+  }
+}
+
+.buttons {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  margin-top: 2.5rem;
+}
+
+.heroButton {
+  padding: 0.7rem 1.75rem;
+  font-weight: 600;
+  font-size: 0.9rem;
+  border-radius: 8px;
+  transition: all 0.15s ease;
+  text-decoration: none;
+}
+
+.heroButtonPrimary {
+  composes: heroButton;
+  background: #10b981;
+  color: #0a0a0b !important;
+  border: none;
+}
+
+.heroButtonPrimary:hover {
+  background: #34d399;
+  color: #0a0a0b !important;
+  text-decoration: none;
+}
+
+.heroButtonSecondary {
+  composes: heroButton;
+  background: transparent;
+  border: 1px solid #27272a;
+  color: #a1a1aa !important;
+}
+
+[data-theme='light'] .heroButtonSecondary {
+  border-color: #e5e7eb;
+  color: #6b7280 !important;
+}
+
+.heroButtonSecondary:hover {
+  border-color: #10b981;
+  color: #10b981 !important;
+  text-decoration: none;
+}
+
+/* ─── Badge ───────────────────────────────────────────────────── */
+
+.badge {
+  display: inline-block;
+  padding: 0.25rem 0.85rem;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  background: rgba(16, 185, 129, 0.1);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.2);
+  margin-bottom: 1.5rem;
+}
+
+[data-theme='light'] .badge {
+  background: rgba(16, 185, 129, 0.08);
+  color: #0d9668;
+  border-color: rgba(16, 185, 129, 0.2);
+}
+
+/* ─── Features ────────────────────────────────────────────────── */
+
+.features {
+  padding: 4rem 0;
+  border-top: 1px solid var(--orvex-card-border);
+}
+
+.sectionTitle {
+  text-align: center;
+  font-size: 1.75rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  margin-bottom: 0.25rem;
+}
+
+.sectionSubtitle {
+  text-align: center;
+  color: var(--orvex-subtle-text);
+  font-size: 1rem;
+  margin-bottom: 2.5rem;
+}
+
+.featureCard {
+  background: var(--orvex-card-bg);
+  border: 1px solid var(--orvex-card-border);
+  border-radius: 10px;
+  padding: 1.5rem;
+  height: 100%;
+  transition: border-color 0.15s ease;
+}
+
+.featureCard:hover {
+  border-color: rgba(16, 185, 129, 0.3);
+}
+
+.featureTitle {
+  font-size: 0.95rem;
+  font-weight: 700;
+  margin-bottom: 0.35rem;
+}
+
+.featureDesc {
+  color: var(--orvex-subtle-text);
+  font-size: 0.85rem;
+  line-height: 1.6;
+  margin: 0;
+}
+
+/* ─── Code showcase ───────────────────────────────────────────── */
+
+.codeShowcase {
+  padding: 4rem 0;
+  border-top: 1px solid var(--orvex-card-border);
+}
+
+.codeShowcaseTitle {
+  font-size: 1.3rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin-bottom: 0.35rem;
+}
+
+.codeShowcaseSubtitle {
+  color: var(--orvex-subtle-text);
+  font-size: 0.9rem;
+  margin-bottom: 1.5rem;
+  line-height: 1.6;
+}
+
+.codeTag {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  background: rgba(16, 185, 129, 0.1);
+  color: var(--ifm-color-primary);
+  margin-bottom: 0.75rem;
+}
+
+/* ─── Quick start ─────────────────────────────────────────────── */
+
+.quickStart {
+  padding: 4rem 0;
+  border-top: 1px solid var(--orvex-card-border);
+}
+
+.quickStartTitle {
+  composes: sectionTitle;
+}
+
+.quickStartSubtitle {
+  composes: sectionSubtitle;
+}
+
+.pathCard {
+  display: flex;
+  flex-direction: column;
+  background: var(--orvex-card-bg);
+  border: 1px solid var(--orvex-card-border);
+  border-radius: 10px;
+  padding: 1.5rem;
+  height: 100%;
+  text-decoration: none !important;
+  color: inherit !important;
+  transition: border-color 0.15s ease;
+}
+
+.pathCard:hover {
+  border-color: var(--ifm-color-primary);
+}
+
+.pathNumber {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  background: rgba(16, 185, 129, 0.1);
+  color: var(--ifm-color-primary);
+  margin-bottom: 0.75rem;
+}
+
+.pathTitle {
+  font-size: 1rem;
+  font-weight: 700;
+  margin-bottom: 0.35rem;
+}
+
+.pathDesc {
+  color: var(--orvex-subtle-text);
+  font-size: 0.85rem;
+  line-height: 1.5;
+  flex-grow: 1;
+}
+
+.pathArrow {
+  color: var(--ifm-color-primary);
+  font-weight: 600;
+  font-size: 0.8rem;
+  margin-top: 0.75rem;
+}

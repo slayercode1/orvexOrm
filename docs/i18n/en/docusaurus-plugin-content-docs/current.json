@@ -1,0 +1,18 @@
+{
+  "version.label": {
+    "message": "1.0.0",
+    "description": "The label for version current"
+  },
+  "sidebar.docsSidebar.category.Pour commencer": {
+    "message": "Getting Started",
+    "description": "The label for category 'Pour commencer' in sidebar 'docsSidebar'"
+  },
+  "sidebar.docsSidebar.category.Guides": {
+    "message": "Guides",
+    "description": "The label for category 'Guides' in sidebar 'docsSidebar'"
+  },
+  "sidebar.docsSidebar.category.Reference API": {
+    "message": "API Reference",
+    "description": "The label for category 'Reference API' in sidebar 'docsSidebar'"
+  }
+}

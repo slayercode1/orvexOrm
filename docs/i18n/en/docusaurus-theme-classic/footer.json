@@ -1,0 +1,66 @@
+{
+  "link.title.Pour commencer": {
+    "message": "Getting Started",
+    "description": "The title of the footer links column with title=Pour commencer in the footer"
+  },
+  "link.title.Guides": {
+    "message": "Guides",
+    "description": "The title of the footer links column with title=Guides in the footer"
+  },
+  "link.title.Reference API": {
+    "message": "API Reference",
+    "description": "The title of the footer links column with title=Reference API in the footer"
+  },
+  "link.item.label.Introduction": {
+    "message": "Introduction",
+    "description": "The label of footer link with label=Introduction linking to /docs/introduction"
+  },
+  "link.item.label.Installation": {
+    "message": "Installation",
+    "description": "The label of footer link with label=Installation linking to /docs/installation"
+  },
+  "link.item.label.Premier pas": {
+    "message": "Quick Start",
+    "description": "The label of footer link with label=Premier pas linking to /docs/getting-started"
+  },
+  "link.item.label.Exemples": {
+    "message": "Examples",
+    "description": "The label of footer link with label=Exemples linking to /docs/examples"
+  },
+  "link.item.label.Les Models": {
+    "message": "Models",
+    "description": "The label of footer link with label=Les Models linking to /docs/guides/models"
+  },
+  "link.item.label.Query Builder": {
+    "message": "Query Builder",
+    "description": "The label of footer link with label=Query Builder linking to /docs/guides/query-builder"
+  },
+  "link.item.label.Relations": {
+    "message": "Relations",
+    "description": "The label of footer link with label=Relations linking to /docs/guides/relations"
+  },
+  "link.item.label.Migrations": {
+    "message": "Migrations",
+    "description": "The label of footer link with label=Migrations linking to /docs/guides/migrations"
+  },
+  "link.item.label.ORM": {
+    "message": "ORM",
+    "description": "The label of footer link with label=ORM linking to /docs/api/orm"
+  },
+  "link.item.label.Model": {
+    "message": "Model",
+    "description": "The label of footer link with label=Model linking to /docs/api/model"
+  },
+  "link.item.label.Instance": {
+    "message": "Instance",
+    "description": "The label of footer link with label=Instance linking to /docs/api/instance"
+  },
+  "link.item.label.Builder": {
+    "message": "Builder",
+    "description": "The label of footer link with label=Builder linking to /docs/api/builder"
+  },
+  "copyright": {
+    "message": "Copyright © 2026 OrvexORM",
+    "description": "The footer copyright"
+  }
+}

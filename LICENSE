@@ -1,0 +1,25 @@
+OrvexORM - Proprietary License
+
+Copyright (c) 2024-2026 Orvex. All rights reserved.
+
+This software and associated documentation files (the "Software") are the
+exclusive property of Orvex. The Software is licensed, not sold.
+
+GRANT OF LICENSE:
+You are granted a non-exclusive, non-transferable license to use the compiled
+version of the Software (bytecode .luac files) on your FiveM server(s), subject
+to the terms below.
+
+RESTRICTIONS:
+1. You may NOT distribute, sublicense, sell, or share the Software.
+2. You may NOT decompile, reverse-engineer, or attempt to derive the source code.
+3. You may NOT modify the compiled Software.
+4. You may NOT remove or alter any proprietary notices.
+5. You may NOT use the Software to create a competing product.
+
+DISCLAIMER:
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED. IN NO EVENT SHALL ORVEX BE LIABLE FOR ANY DAMAGES ARISING FROM THE
+USE OF THE SOFTWARE.
+
+For licensing inquiries, contact: contact@orvex.dev
