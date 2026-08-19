@@ -22,13 +22,17 @@ jobs:
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
       - name: Update version in fxmanifest.lua
-        run: sed -i "s/version '.*'/version '${{ steps.version.outputs.VERSION }}'/" fxmanifest.lua
+        run: |
+          sed -i "s/^version '[^']*'$/version '${{ steps.version.outputs.VERSION }}'/" fxmanifest.lua
+          grep -Fxq "fx_version 'cerulean'" fxmanifest.lua
+          grep -Fxq "version '${{ steps.version.outputs.VERSION }}'" fxmanifest.lua
 
       - name: Package release
         run: |
           mkdir -p release/orvexorm
           cp -r core/ database/ utils/ lib/ release/orvexorm/
-          cp fxmanifest.lua release/orvexorm/
+          cp fxmanifest.lua studio.html README.md LICENSE release/orvexorm/
+          test -f release/orvexorm/studio.html
           cd release && zip -r ../orvexorm-${{ steps.version.outputs.VERSION }}.zip orvexorm/
 
       - name: Generate changelog
@@ -45,7 +49,7 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Create release
-        uses: softprops/action-gh-release@fe965f7af51af5f2602596916f38a38df2e33de0 # v3.0.2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: orvexorm-${{ steps.version.outputs.VERSION }}.zip
           body: |
