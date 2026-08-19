@@ -43,3 +43,6 @@ docs/.dockerignore
 # Misc
 *.bak
 *.tmp
+
+# Local publishing drafts
+POST_CFX.md
