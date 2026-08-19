@@ -1,5 +1,6 @@
 fx_version 'cerulean'
 game 'common'
+server_only 'yes'
 
 name 'orvexorm'
 version '1.2.1'
