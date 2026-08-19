@@ -2,7 +2,7 @@ fx_version 'cerulean'
 game 'common'
 
 name 'orvexorm'
-version '1.2.0'
+version '1.2.1'
 author 'Orvex'
 description 'Lightweight ORM for FiveM built on oxmysql or mysql-async'
 

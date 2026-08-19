@@ -424,6 +424,12 @@ http://localhost:30120/orvexorm/?token=a1b2c3d4...
 - **`upsert`** avec `timestamps = true` ne reecrase plus `created_at` sur les doublons.
 - **Studio** : anti-bruteforce par IP, compatible mysql-async, garde-fous supplementaires.
 
+### Correctif v1.2.1
+
+- Mutualisation de l'execution et de la gestion des erreurs SQL du Studio.
+- Centralisation des conventions de cles et de tables pour les relations.
+- Suppression de traitements dupliques lors du comptage des relations.
+
 ---
 
 ## Contribuer

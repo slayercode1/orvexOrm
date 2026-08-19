@@ -205,7 +205,7 @@ end)
 
 Tu devrais voir dans la console :
 ```
-[OrvexORM] v1.2.0 loaded — ready to use
+[OrvexORM] v1.2.1 loaded — ready to use
 [OrvexORM] Installation OK !
 ```
 

@@ -863,6 +863,34 @@ function Model.new(tableName, fields, adapter, opts, cache)
         return keys
     end
 
+    --- Resolves how a relation connects the current model to its lookup table.
+    --- Operation-specific behavior (loading, filtering, counting) stays with
+    --- each caller; relation key conventions live in one place.
+    ---@param rel table
+    ---@return table|nil shape
+    local function relationShape(rel)
+        if rel.type == Relations.HAS_ONE or rel.type == Relations.HAS_MANY then
+            return {
+                sourceKey = rel.localKey or primaryKey,
+                lookupTable = rel.model._tableName,
+                lookupKey = rel.foreignKey,
+            }
+        elseif rel.type == Relations.BELONGS_TO then
+            return {
+                sourceKey = rel.foreignKey,
+                lookupTable = rel.model._tableName,
+                lookupKey = rel.ownerKey or rel.model._primaryKey,
+            }
+        elseif rel.type == Relations.BELONGS_TO_MANY then
+            return {
+                sourceKey = rel.localKey or primaryKey,
+                lookupTable = rel.pivot,
+                lookupKey = rel.foreignKey,
+            }
+        end
+        return nil
+    end
+
     --- Batched eager loading: one query per relation instead of one per
     --- instance (avoids N+1). belongsToMany falls back to per-instance loading.
     ---@param instances OrvexInstance[]
@@ -871,14 +899,14 @@ function Model.new(tableName, fields, adapter, opts, cache)
         for _, name in ipairs(relationNames) do
             local rel = relations[name]
             if rel then
+                local shape = relationShape(rel)
                 if rel.type == Relations.HAS_ONE or rel.type == Relations.HAS_MANY then
-                    local localKey = rel.localKey or primaryKey
-                    local keys = collectKeys(instances, localKey)
+                    local keys = collectKeys(instances, shape.sourceKey)
                     local byKey = {}
                     if #keys > 0 then
-                        local related = rel.model.query():whereIn(rel.foreignKey, keys):get()
+                        local related = rel.model.query():whereIn(shape.lookupKey, keys):get()
                         for _, r in ipairs(related) do
-                            local fk = r[rel.foreignKey]
+                            local fk = r[shape.lookupKey]
                             if rel.type == Relations.HAS_MANY then
                                 local bucket = byKey[fk]
                                 if not bucket then bucket = {}; byKey[fk] = bucket end
@@ -889,7 +917,7 @@ function Model.new(tableName, fields, adapter, opts, cache)
                         end
                     end
                     for _, inst in ipairs(instances) do
-                        local kv = inst[localKey]
+                        local kv = inst[shape.sourceKey]
                         local loaded = kv ~= nil and byKey[kv] or nil
                         if rel.type == Relations.HAS_MANY then
                             inst[name] = loaded or {}
@@ -898,19 +926,18 @@ function Model.new(tableName, fields, adapter, opts, cache)
                         end
                     end
                 elseif rel.type == Relations.BELONGS_TO then
-                    local ownerKey = rel.ownerKey or rel.model._primaryKey
-                    local keys = collectKeys(instances, rel.foreignKey)
+                    local keys = collectKeys(instances, shape.sourceKey)
                     local byKey = {}
                     if #keys > 0 then
-                        local related = rel.model.query():whereIn(ownerKey, keys):get()
+                        local related = rel.model.query():whereIn(shape.lookupKey, keys):get()
                         for _, r in ipairs(related) do
-                            if byKey[r[ownerKey]] == nil then
-                                byKey[r[ownerKey]] = r
+                            if byKey[r[shape.lookupKey]] == nil then
+                                byKey[r[shape.lookupKey]] = r
                             end
                         end
                     end
                     for _, inst in ipairs(instances) do
-                        local kv = inst[rel.foreignKey]
+                        local kv = inst[shape.sourceKey]
                         inst[name] = kv ~= nil and byKey[kv] or nil
                     end
                 else
@@ -934,29 +961,13 @@ function Model.new(tableName, fields, adapter, opts, cache)
         local b = M.query()
 
         local subSQL, subParams
+        local shape = relationShape(rel)
 
-        if rel.type == Relations.HAS_ONE or rel.type == Relations.HAS_MANY then
-            local localKey = rel.localKey or primaryKey
+        if shape then
             subSQL = ("SELECT 1 FROM %s WHERE %s.%s = %s.%s"):format(
-                rel.model._tableName,
-                rel.model._tableName, rel.foreignKey,
-                tableName, localKey
-            )
-            subParams = {}
-        elseif rel.type == Relations.BELONGS_TO then
-            local ownerKey = rel.ownerKey or rel.model._primaryKey
-            subSQL = ("SELECT 1 FROM %s WHERE %s.%s = %s.%s"):format(
-                rel.model._tableName,
-                rel.model._tableName, ownerKey,
-                tableName, rel.foreignKey
-            )
-            subParams = {}
-        elseif rel.type == Relations.BELONGS_TO_MANY then
-            local localKey = rel.localKey or primaryKey
-            subSQL = ("SELECT 1 FROM %s WHERE %s.%s = %s.%s"):format(
-                rel.pivot,
-                rel.pivot, rel.foreignKey,
-                tableName, localKey
+                shape.lookupTable,
+                shape.lookupTable, shape.lookupKey,
+                tableName, shape.sourceKey
             )
             subParams = {}
         else
@@ -992,7 +1003,7 @@ function Model.new(tableName, fields, adapter, opts, cache)
         assert(rel, ("Unknown relation '%s'"):format(relationName))
         assert(rel.type ~= Relations.BELONGS_TO, "countByRelation not supported for belongsTo")
 
-        local localKey = rel.localKey or primaryKey
+        local shape = relationShape(rel)
 
         local b = M.query()
         if where then b:where(where) end
@@ -1001,23 +1012,13 @@ function Model.new(tableName, fields, adapter, opts, cache)
         local counts = {}
         if #results == 0 then return counts end
 
-        local countTable = rel.type == Relations.BELONGS_TO_MANY and rel.pivot or rel.model._tableName
-        local keys = {}
-        do
-            local seen = {}
-            for _, inst in ipairs(results) do
-                local kv = inst[localKey]
-                if kv ~= nil and not seen[kv] then
-                    seen[kv] = true
-                    keys[#keys + 1] = kv
-                end
-            end
-        end
+        local keys = collectKeys(results, shape.sourceKey)
 
         local byKey = {}
         if #keys > 0 then
             local countSQL = ("SELECT %s AS fk, COUNT(*) AS cnt FROM %s WHERE %s IN (%s) GROUP BY %s"):format(
-                rel.foreignKey, countTable, rel.foreignKey, Helpers.placeholders(#keys), rel.foreignKey
+                shape.lookupKey, shape.lookupTable, shape.lookupKey,
+                Helpers.placeholders(#keys), shape.lookupKey
             )
             Logger.query(countSQL, keys)
             local rows = adapter:execute(countSQL, keys)
@@ -1031,7 +1032,7 @@ function Model.new(tableName, fields, adapter, opts, cache)
         end
 
         for _, inst in ipairs(results) do
-            local kv = inst[localKey]
+            local kv = inst[shape.sourceKey]
             local cnt = (kv ~= nil and byKey[kv]) or 0
             inst["_count_" .. relationName] = cnt
             counts[#counts + 1] = { instance = inst, count = cnt }

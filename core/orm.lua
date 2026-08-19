@@ -12,7 +12,7 @@ local Helpers       = OrvexHelpers or require("utils.helpers")
 ---@class OrvexORM
 local ORM = {}
 
-ORM.version = "1.2.0"
+ORM.version = "1.2.1"
 
 ---@type OrvexAdapter
 local defaultAdapter = Adapter.new(MySQLDriver.new())

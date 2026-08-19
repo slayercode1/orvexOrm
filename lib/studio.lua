@@ -161,29 +161,24 @@ end
 -- Routed through the ORM adapter, so the Studio works with both
 -- oxmysql and mysql-async (same auto-detection as the ORM itself).
 
-local function dbQuery(sql, params)
-    local ok, result = pcall(OrvexORM.raw, sql, params or {})
+local function dbCall(operation, sql, params)
+    local ok, result = pcall(operation, sql, params or {})
     if ok then return result end
     error(Errors.new("INTERNAL_ERROR", tostring(result)))
+end
+
+local function dbQuery(sql, params)
+    return dbCall(OrvexORM.raw, sql, params)
 end
 
 local function dbScalar(sql, params)
-    local ok, result = pcall(OrvexORM.raw, sql, params or {})
-    if ok and type(result) == "table" and result[1] then return result[1] end
-    if ok then return result end
-    error(Errors.new("INTERNAL_ERROR", tostring(result)))
+    local result = dbQuery(sql, params)
+    if type(result) == "table" and result[1] then return result[1] end
+    return result
 end
 
-local function dbInsert(sql, params)
-    local ok, result = pcall(OrvexORM.rawExec, sql, params or {})
-    if ok then return result end
-    error(Errors.new("INTERNAL_ERROR", tostring(result)))
-end
-
-local function dbUpdate(sql, params)
-    local ok, result = pcall(OrvexORM.rawExec, sql, params or {})
-    if ok then return result end
-    error(Errors.new("INTERNAL_ERROR", tostring(result)))
+local function dbExecute(sql, params)
+    return dbCall(OrvexORM.rawExec, sql, params)
 end
 
 -- ─── API handlers ──────────────────────────────────────────────────
@@ -284,7 +279,7 @@ local function apiInsert(tableName, body)
     if #cols == 0 then error(Errors.new("VALIDATION_ERROR", "No valid columns")) end
 
     local sql = "INSERT INTO " .. tn .. " (" .. table.concat(cols, ", ") .. ") VALUES (" .. table.concat(placeholders, ", ") .. ")"
-    local id = dbInsert(sql, vals)
+    local id = dbExecute(sql, vals)
     return { success = true, insertId = id }
 end
 
@@ -310,7 +305,7 @@ local function apiUpdate(tableName, body)
     vals[#vals + 1] = body.pkValue
 
     local sql = "UPDATE " .. tn .. " SET " .. table.concat(setClauses, ", ") .. " WHERE " .. pkCol .. " = ?"
-    local affected = dbUpdate(sql, vals)
+    local affected = dbExecute(sql, vals)
     return { success = true, affectedRows = affected }
 end
 
@@ -324,7 +319,7 @@ local function apiDelete(tableName, body)
     if body.pkValue == nil then error(Errors.new("VALIDATION_ERROR", "Missing primary key value")) end
 
     local sql = "DELETE FROM " .. tn .. " WHERE " .. pkCol .. " = ? LIMIT 1"
-    local affected = dbUpdate(sql, { body.pkValue })
+    local affected = dbExecute(sql, { body.pkValue })
     return { success = true, affectedRows = affected }
 end
 
