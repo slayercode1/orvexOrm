@@ -118,6 +118,30 @@ SELECT * FROM users WHERE job = ?
 - `findAll()` returns **a list** (which can be empty `{}`)
 :::
 
+### `Model.all()`
+
+Returns **all rows** in the table. It's a shortcut for `findAll({})`.
+
+```lua
+local players = User.all()
+
+print(#players .. " players in total")
+```
+
+**Generated SQL:**
+```sql
+SELECT * FROM users
+```
+
+### Sending data to a client
+
+Instances contain internal fields and a metatable, so don't send them raw over the network. Use `instance:toTable()` to get a plain table:
+
+```lua
+local player = User.find({ identifier = "license:abc" })
+TriggerClientEvent("myresource:playerData", src, player:toTable())
+```
+
 ---
 
 ## Update
@@ -315,6 +339,7 @@ p:update({ money = 1000 })
 | Update or create | `User.updateOrCreate(where, data)` | — |
 | Read one | `User.find(where)` | — |
 | Read many | `User.findAll(where)` | — |
+| Read all | `User.all()` | — |
 | Update | `User.update(data, where)` | `player:update(data)` |
 | Delete | `User.delete(where)` | `player:delete()` |
 | Delete (force) | `User.forceDelete(where)` | `player:forceDelete()` |

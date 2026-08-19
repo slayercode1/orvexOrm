@@ -218,6 +218,24 @@ Filters with `WHERE EXISTS` (subquery).
 
 ---
 
+### `:whereRaw(clause, params?)`
+
+Adds a raw SQL clause, wrapped in parentheses and combined with AND.
+
+```lua
+:whereRaw("LOWER(job) = ?", { "police" })
+-- SQL: WHERE (LOWER(job) = ?)
+
+:whereRaw("money > ? OR job = ?", { 1000, "police" })
+-- SQL: WHERE (money > ? OR job = ?)
+```
+
+:::caution
+Always pass values through `params` (`?` placeholders), **never** by string concatenation. Concatenating values into the clause opens the door to SQL injection.
+:::
+
+---
+
 ### `:after(column, value, direction?)`
 
 Cursor-based pagination: retrieves rows after a given value.

@@ -88,16 +88,14 @@ local function _mock_cb(query, params, cb)
 end
 
 MySQL = {
-    prepare = function(query, params, cb)
-        _mock_cb(query, params, cb)
-    end,
+    prepare = _mock_cb,
+    query = _mock_cb,
+    insert = _mock_cb,
+    update = _mock_cb,
     Async = {
-        fetchAll = function(query, params, cb)
-            _mock_cb(query, params, cb)
-        end,
-        execute = function(query, params, cb)
-            _mock_cb(query, params, cb)
-        end,
+        fetchAll = _mock_cb,
+        execute = _mock_cb,
+        insert = _mock_cb,
         transaction = function(queries, cb)
             _tx_log[#_tx_log + 1] = queries
             cb(true)
@@ -1239,11 +1237,12 @@ print("\n== countByRelation ==")
 
 reset()
 _mock_results[1] = { { id = 1, identifier = "license:cr1", money = 100 } }
-_mock_results[2] = { { cnt = 3 } }
+_mock_results[2] = { { fk = 1, cnt = 3 } }
 local crResults = WHUser.countByRelation("vehicles", { id = 1 })
 assert_eq(#crResults, 1, "countByRelation: returns result entries")
 assert_eq(crResults[1].count, 3, "countByRelation: count is correct")
 assert_eq(crResults[1].instance._count_vehicles, 3, "countByRelation: _count_ field set on instance")
+assert_match(_db_log[2].sql, "GROUP BY", "countByRelation: single GROUP BY query")
 
 -- ─── Test: Nested Writes (createWith) ────────────────────────────
 
@@ -1869,7 +1868,180 @@ end -- end runExtendedTests
 
 runExtendedTests()
 
+-- ─── Test: v1.2.0 features ─────────────────────────────────────────
+
+local function runV12Tests()
+
+local ORM = require("core.orm")
+
+-- toTable
+print("\n== Instance:toTable ==")
+
+reset()
+local TTUser = ORM.model("tt_users", {
+    id       = "number",
+    name     = "string",
+    position = "json",
+}, { primaryKey = "id" })
+
+_mock_results[1] = { { id = 1, name = "Bob", position = '{"x":10}' } }
+local ttInst = TTUser.find({ id = 1 })
+local plain = ttInst:toTable()
+assert_eq(plain.id, 1, "toTable: keeps public fields")
+assert_eq(plain.name, "Bob", "toTable: keeps name")
+assert_eq(plain._tableName, nil, "toTable: strips private fields")
+assert_eq(plain._adapter, nil, "toTable: strips adapter")
+assert_eq(getmetatable(plain), nil, "toTable: no metatable")
+assert_eq(type(plain.position), "table", "toTable: json field stays decoded")
+
+-- refresh
+print("\n== Instance:refresh ==")
+
+reset()
+_mock_results[1] = { { id = 2, name = "Old", position = nil } }
+local rfInst = TTUser.find({ id = 2 })
+_mock_results[2] = { { id = 2, name = "New", position = nil } }
+local found = rfInst:refresh()
+assert_eq(found, true, "refresh: returns true when row exists")
+assert_eq(rfInst.name, "New", "refresh: reloads fields from DB")
+
+reset()
+_mock_results[1] = { { id = 3, name = "Ghost" } }
+local ghost = TTUser.find({ id = 3 })
+_mock_results[2] = {}
+assert_eq(ghost:refresh(), false, "refresh: returns false when row is gone")
+
+-- whereRaw
+print("\n== Builder:whereRaw ==")
+
+reset()
+_mock_results[1] = {}
+TTUser.query():whereRaw("JSON_EXTRACT(position, '$.x') > ?", { 5 }):get()
+assert_match(_db_log[1].sql, "JSON_EXTRACT", "whereRaw: clause injected")
+assert_eq(_db_log[1].params[1], 5, "whereRaw: params bound")
+
+-- exists() with pre-set limit must not emit two LIMIT clauses
+print("\n== exists() with limit ==")
+
+reset()
+_mock_results[1] = { { ["1"] = 1 } }
+TTUser.query():limit(10):exists()
+local _, limitCount = _db_log[1].sql:gsub("LIMIT", "")
+assert_eq(limitCount, 1, "exists: single LIMIT clause")
+
+-- all()
+print("\n== Model.all ==")
+
+reset()
+_mock_results[1] = { { id = 1, name = "A" }, { id = 2, name = "B" } }
+local allRows = TTUser.all()
+assert_eq(#allRows, 2, "all: returns every row")
+
+-- findAll with include (batched eager loading)
+print("\n== findAll include (batched) ==")
+
+reset()
+local ELUser = ORM.model("el_users", {
+    id   = "number",
+    name = "string",
+}, { primaryKey = "id" })
+local ELVehicle = ORM.model("el_vehicles", {
+    id       = "number",
+    owner_id = "number",
+    plate    = "string",
+}, { primaryKey = "id" })
+ELUser.hasMany("vehicles", ELVehicle, { foreignKey = "owner_id" })
+
+_mock_results[1] = { { id = 1, name = "A" }, { id = 2, name = "B" } }
+_mock_results[2] = {
+    { id = 10, owner_id = 1, plate = "AAA" },
+    { id = 11, owner_id = 1, plate = "BBB" },
+    { id = 12, owner_id = 2, plate = "CCC" },
+}
+local users = ELUser.findAll({}, { include = { "vehicles" } })
+assert_eq(#_db_log, 2, "include: exactly 2 queries (no N+1)")
+assert_match(_db_log[2].sql, "IN %(", "include: uses whereIn batch query")
+assert_eq(#users[1].vehicles, 2, "include: first user has 2 vehicles")
+assert_eq(#users[2].vehicles, 1, "include: second user has 1 vehicle")
+assert_eq(users[1].vehicles[1].plate, "AAA", "include: related rows wrapped")
+
+-- cache stats
+print("\n== Cache stats ==")
+
+local CacheLib = require("utils.cache")
+local statCache = CacheLib.new({ ttl = 60, enabled = true })
+statCache:set("k", { 1 })
+statCache:get("k")
+statCache:get("missing")
+local stats = statCache:stats()
+assert_eq(stats.hits, 1, "stats: hits counted")
+assert_eq(stats.misses, 1, "stats: misses counted")
+assert_eq(stats.entries, 1, "stats: entries counted")
+
+-- cache does not get corrupted by wrapping (mutation bug fix)
+print("\n== Cache integrity ==")
+
+reset()
+local CIUser = ORM.model("ci_users", {
+    id       = "number",
+    position = "json",
+}, { primaryKey = "id", cache = CacheLib.new({ ttl = 60, enabled = true }) })
+
+_mock_results[1] = { { id = 1, position = '{"x":1}' } }
+local first = CIUser.find({ id = 1 })
+assert_eq(type(first.position), "table", "cache integrity: 1st read decodes json")
+-- Second read comes from cache; must decode again from the raw cached row
+local second = CIUser.find({ id = 1 })
+assert_eq(#_db_log, 1, "cache integrity: 2nd read served from cache")
+assert_eq(type(second.position), "table", "cache integrity: cached read decodes json")
+assert_eq(second.position.x, 1, "cache integrity: cached json value intact")
+assert_eq(second._tableName ~= nil, true, "cache integrity: cached read is a full instance")
+
+-- upsert keeps created_at on duplicate
+print("\n== upsert timestamps ==")
+
+reset()
+local UPUser = ORM.model("up_users", {
+    id         = "number",
+    name       = "string",
+    created_at = "datetime",
+    updated_at = "datetime",
+}, { primaryKey = "id", timestamps = true })
+UPUser.upsert({ id = 1, name = "Bob" })
+assert_match(_db_log[1].sql, "ON DUPLICATE KEY UPDATE", "upsert: generates upsert SQL")
+assert_eq(_db_log[1].sql:find("created_at = VALUES"), nil, "upsert: created_at not overwritten on duplicate")
+assert_match(_db_log[1].sql, "updated_at = VALUES%(updated_at%)", "upsert: updated_at refreshed on duplicate")
+
+end -- end runV12Tests
+
+runV12Tests()
+
 -- ─── Summary ───────────────────────────────────────────────────────
+
+print("\n== Migration identifier security ==")
+
+local invalidTableOk = pcall(function()
+    ORM.schema():create("users`; DROP TABLE users; --", function(t) t:id() end)
+end)
+assert_eq(invalidTableOk, false, "migration rejects unsafe table names")
+
+local invalidColumnOk = pcall(function()
+    ORM.schema():create("safe_table", function(t) t:string("name`; DROP TABLE users; --") end)
+end)
+assert_eq(invalidColumnOk, false, "migration rejects unsafe column names")
+
+local invalidIndexOk = pcall(function()
+    ORM.schema():create("safe_table", function(t)
+        t:string("name")
+        t:index("name", "idx`; DROP TABLE users; --")
+    end)
+end)
+assert_eq(invalidIndexOk, false, "migration rejects unsafe index names")
+
+local invalidLengthOk = pcall(function()
+    ORM.schema():create("safe_table", function(t) t:string("name", -1) end)
+end)
+assert_eq(invalidLengthOk, false, "migration rejects invalid VARCHAR lengths")
 
 print(("\n== Results: %d passed, %d failed ==\n"):format(passed, failed))
 os.exit(failed > 0 and 1 or 0)

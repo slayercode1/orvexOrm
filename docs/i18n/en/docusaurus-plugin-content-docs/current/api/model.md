@@ -25,22 +25,49 @@ local player = User.create({ identifier = "license:abc", money = 500 })
 
 ---
 
-### `Model.find(where)` → `OrvexInstance | nil`
+### `Model.find(where, opts?)` → `OrvexInstance | nil`
 
 Returns the first matching row, or `nil`.
 
 ```lua
 local player = User.find({ identifier = "license:abc" })
+
+-- With eager loading
+local player = User.find({ identifier = "license:abc" }, {
+    include = { "profile", "vehicles" }
+})
 ```
 
 ---
 
-### `Model.findAll(where)` → `OrvexInstance[]`
+### `Model.findAll(where, opts?)` → `OrvexInstance[]`
 
 Returns all matching rows.
 
 ```lua
 local cops = User.findAll({ job = "police" })
+```
+
+With `opts.include`, relations are eager-loaded in **batch**: a single `WHERE fk IN (...)` query per relation instead of one query per instance (no N+1). Works for `hasOne`, `hasMany`, and `belongsTo` (`belongsToMany` falls back to per-instance loading).
+
+```lua
+local cops = User.findAll({ job = "police" }, {
+    include = { "vehicles" }
+})
+-- 2 queries total: 1 for users, 1 for all their vehicles
+```
+
+---
+
+### `Model.all(opts?)` → `OrvexInstance[]`
+
+Returns all rows in the table. Shortcut for `Model.findAll({}, opts)`.
+
+```lua
+local players = User.all()
+
+-- With eager loading
+local players = User.all({ include = { "vehicles" } })
 ```
 
 ---
@@ -52,6 +79,10 @@ Inserts or updates if the primary key already exists.
 ```lua
 User.upsert({ identifier = "license:abc", money = 2000 })
 ```
+
+:::info
+With `timestamps = true`, `created_at` is **not** overwritten when the row already exists — only the other fields are updated via `ON DUPLICATE KEY UPDATE`.
+:::
 
 ---
 
@@ -220,7 +251,7 @@ SELECT * FROM users WHERE EXISTS (
 
 ### `Model.countByRelation(relationName, where?)` → `table`
 
-Counts related records for each parent record.
+Counts related records for each parent record. Uses a **single `GROUP BY` query** instead of one `COUNT` query per record.
 
 ```lua
 local results = User.countByRelation("vehicles", { job = "police" })

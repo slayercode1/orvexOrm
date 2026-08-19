@@ -70,6 +70,10 @@ ON DUPLICATE KEY UPDATE identifier = VALUES(identifier), money = VALUES(money)
 Utilise `upsert` quand tu veux sauvegarder des donnees sans savoir si la ligne existe deja. C'est parfait pour les systemes de sauvegarde automatique.
 :::
 
+:::info upsert et timestamps
+Avec `timestamps = true`, `created_at` n'est pas reecrase quand la ligne existe deja : seuls les autres champs sont mis a jour.
+:::
+
 ---
 
 ## Read — Lire
@@ -136,6 +140,20 @@ local players = User.findAll({
 - `find()` retourne **un seul** resultat (le premier) ou `nil`
 - `findAll()` retourne **une liste** (qui peut etre vide `{}`)
 :::
+
+### `Model.all(opts?)`
+
+Retourne **toutes les lignes** de la table. C'est un raccourci pour `findAll({}, opts)`.
+
+```lua
+local everyone = User.all()
+print(#everyone .. " joueurs dans la base")
+```
+
+**SQL genere :**
+```sql
+SELECT * FROM users
+```
 
 ---
 
@@ -281,6 +299,25 @@ local moneys = User.pluck("money", { job = "police" })
 -- { 1500, 3000, 800 }
 ```
 
+### `toTable` — Envoyer au client
+
+Une instance contient des champs internes et une metatable : elle ne passe pas telle quelle dans `TriggerClientEvent` ou `json.encode`. Utilise `:toTable()` pour obtenir une copie plate, prete a etre envoyee.
+
+```lua
+local player = User.find({ identifier = "license:abc" })
+TriggerClientEvent("myresource:playerData", src, player:toTable())
+```
+
+### `refresh` — Recharger depuis la base
+
+Recharge les colonnes d'une instance depuis la base de donnees. Retourne `false` si la ligne n'existe plus.
+
+```lua
+if player:refresh() then
+    print(player.money)  -- donnees fraiches
+end
+```
+
 ### `updateWhere` / `deleteWhere` — Alias lisibles
 
 ```lua
@@ -393,7 +430,8 @@ p:update({ money = 1000 })
 | Lire un | `User.find(where)` | — |
 | Lire un (ou erreur) | `User.findOrFail(where)` | — |
 | Premier resultat | `User.first(where?)` | — |
-| Lire plusieurs | `User.findAll(where)` | — |
+| Lire plusieurs | `User.findAll(where, opts?)` | — |
+| Lire tout | `User.all(opts?)` | — |
 | Existe ? | `User.exists(where)` | — |
 | Extraire colonne | `User.pluck(col, where?)` | — |
 | Modifier | `User.update(data, where)` | `player:update(data)` |
@@ -404,3 +442,5 @@ p:update({ money = 1000 })
 | Restaurer | `User.restore(where)` | `player:restore()` |
 | Incrementer | `User.increment(col, n, where)` | `player:increment(col, n)` |
 | Decrementer | `User.decrement(col, n, where)` | `player:decrement(col, n)` |
+| Recharger | — | `player:refresh()` |
+| Convertir en table | — | `player:toTable()` |

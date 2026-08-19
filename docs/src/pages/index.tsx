@@ -1,7 +1,5 @@
 import type {ReactNode} from 'react';
-import clsx from 'clsx';
 import Link from '@docusaurus/Link';
-import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Layout from '@theme/Layout';
 import Heading from '@theme/Heading';
 import CodeBlock from '@theme/CodeBlock';
@@ -9,27 +7,45 @@ import Translate, {translate} from '@docusaurus/Translate';
 
 import styles from './index.module.css';
 
+const heroCode = `local User = OrvexORM.model("users", {
+    identifier = "string",
+    money      = "number",
+    position   = "json",
+}, { primaryKey = "identifier" })
+
+local player = User.find({ identifier = id })
+player:update({ money = 1000 })
+player:increment("money", 500)`;
+
 function HomepageHeader() {
-  const {siteConfig} = useDocusaurusContext();
   return (
-    <header className={clsx('hero hero--primary', styles.heroBanner)}>
+    <header className={styles.heroBanner}>
       <div className="container">
-        <span className={styles.badge}>Open Source &middot; FiveM &middot; oxmysql</span>
-        <Heading as="h1" className="hero__title">
-          OrvexORM
-        </Heading>
-        <p className="hero__subtitle">
-          <Translate id="homepage.subtitle">
-            Un ORM leger pour FiveM. Transforme tes requetes SQL en code Lua lisible.
-          </Translate>
-        </p>
-        <div className={styles.buttons}>
-          <Link className={styles.heroButtonPrimary} to="/docs/getting-started">
-            <Translate id="homepage.getStarted">Commencer</Translate>
-          </Link>
-          <Link className={styles.heroButtonSecondary} to="/docs/examples">
-            <Translate id="homepage.examples">Exemples</Translate>
-          </Link>
+        <div className={styles.heroInner}>
+          <div>
+            <span className={styles.heroEyebrow}>
+              <Translate id="homepage.eyebrow">Open source · FiveM · Lua 5.4</Translate>
+            </span>
+            <Heading as="h1" className={styles.heroTitle}>
+              <Translate id="homepage.headline">L'ORM qui fait disparaitre le SQL.</Translate>
+            </Heading>
+            <p className={styles.heroSubtitle}>
+              <Translate id="homepage.subtitle">
+                Un ORM leger pour FiveM. Transforme tes requetes SQL en code Lua lisible.
+              </Translate>
+            </p>
+            <div className={styles.buttons}>
+              <Link className={styles.heroButtonPrimary} to="/docs/getting-started">
+                <Translate id="homepage.getStarted">Commencer</Translate>
+              </Link>
+              <Link className={styles.heroButtonSecondary} to="/docs/examples">
+                <Translate id="homepage.examples">Exemples</Translate>
+              </Link>
+            </div>
+          </div>
+          <div className={styles.heroCode}>
+            <CodeBlock language="lua" title="server.lua">{heroCode}</CodeBlock>
+          </div>
         </div>
       </div>
     </header>
@@ -202,7 +218,7 @@ function QuickStart() {
           {paths.map((p, i) => (
             <div key={i} className="col col--3 margin-bottom--md">
               <Link to={p.link} className={styles.pathCard}>
-                <span className={styles.pathNumber}>{p.num}</span>
+                <span className={styles.pathNumber}>{'0' + p.num}</span>
                 <div className={styles.pathTitle}>{p.title}</div>
                 <p className={styles.pathDesc}>{p.desc}</p>
                 <span className={styles.pathArrow}>&rarr;</span>

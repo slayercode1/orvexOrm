@@ -12,7 +12,7 @@ slug: /installation
 - A **MySQL** or **MariaDB** database
 
 :::info Compatibility
-OrvexORM automatically detects which MySQL library is installed on your server. No configuration needed — it works with both.
+OrvexORM automatically detects which MySQL library is installed on your server. No configuration needed — it works with both. Under the hood, the driver uses `MySQL.query`/`MySQL.insert`/`MySQL.update` with the oxmysql global API (instead of `MySQL.prepare`, which flattens single-row results), and `MySQL.Async.insert` under mysql-async to get the real `insertId`.
 :::
 
 ---

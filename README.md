@@ -12,7 +12,7 @@ Zero SQL. Zero galere. Juste du Lua propre.
 [![oxmysql](https://img.shields.io/badge/oxmysql-Compatible-purple)](https://github.com/overextended/oxmysql)
 [![mysql-async](https://img.shields.io/badge/mysql--async-Compatible-purple)](https://github.com/brouznouf/fivem-mysql-async)
 
-[Documentation](https://orvexorm.yann-dev.fr) | [GitHub](https://github.com/slayercode1/orvexOrm) | [Installation](#installation) | [Exemples](#exemples-rapides)
+[Documentation](https://slayercode1.github.io/orvexOrm/) | [GitHub](https://github.com/slayercode1/orvexOrm) | [Installation](#installation) | [Exemples](#exemples-rapides)
 
 ---
 
@@ -36,10 +36,10 @@ player:update({ money = 1000 })
 | | Sans ORM | Avec OrvexORM |
 |---|---|---|
 | SQL a la main | Oui | Non |
-| Risque d'erreurs SQL | Eleve | Zero |
+| Risque d'erreurs SQL | Eleve | Reduit par les requetes parametrees |
 | Validation des types | Non | Automatique |
 | Relations entre tables | Complexe | 1 ligne |
-| Performance | Depend de toi | < 0.01ms/op |
+| Performance | Depend de toi | Requetes et chargements groupes |
 
 ---
 
@@ -55,6 +55,17 @@ ensure orvexorm
 ```
 
 > OrvexORM detecte automatiquement **oxmysql** ou **mysql-async**. Aucune configuration necessaire.
+
+4. Dans chaque ressource qui utilise l'ORM, charge OrvexORM avant tes scripts serveur :
+
+```lua
+dependency 'orvexorm'
+
+server_scripts {
+    '@orvexorm/import.lua',
+    'server/**/*.lua'
+}
+```
 
 ---
 
@@ -90,7 +101,14 @@ local player = User.create({ identifier = "license:abc", money = 500, job = "pol
 local player = User.find({ identifier = "license:abc" })
 local player = User.findOrFail({ identifier = "license:abc" })  -- erreur si non trouve
 local cops   = User.findAll({ job = "police" })
+local tous   = User.all()
 local first  = User.first({ job = "police" })
+
+-- Recharger depuis la base
+player:refresh()
+
+-- Envoyer au client (table propre, sans champs internes)
+TriggerClientEvent("monScript:player", src, player:toTable())
 
 -- Verifier
 if User.exists({ identifier = "license:abc" }) then ... end
@@ -136,6 +154,19 @@ local jobs = User.pluck("job")
 User.query():chunk(100, function(players)
     for _, p in ipairs(players) do p:update({ money = 0 }) end
 end)
+
+-- Clause SQL libre (toujours avec des parametres, jamais de concatenation !)
+User.query():whereRaw("JSON_EXTRACT(position, '$.x') > ?", { 100 }):get()
+```
+
+### Cache
+
+```lua
+OrvexORM.enableCache({ ttl = 60 })  -- cache lecture 60s, invalide automatiquement a l'ecriture
+
+-- Surveiller l'efficacite du cache
+local stats = OrvexORM.cacheStats()
+print(("hits: %d, misses: %d, hit rate: %.0f%%"):format(stats.hits, stats.misses, stats.hitRate * 100))
 ```
 
 ### Relations
@@ -148,6 +179,12 @@ Vehicle.belongsTo("owner", User, { foreignKey = "owner_id" })
 local player   = User.find({ identifier = "license:abc" })
 local vehicles = player:get("vehicles")
 local profile  = player:get("profile")
+
+-- Eager loading batche : 1 seule requete par relation, meme pour 1000 joueurs
+local players = User.findAll({ job = "police" }, { include = { "vehicles", "profile" } })
+for _, p in ipairs(players) do
+    print(p.identifier, #p.vehicles)  -- deja charge, zero requete supplementaire
+end
 
 -- Creer avec les relations
 User.createWith({
@@ -226,7 +263,7 @@ Benchmarks sur Lua 5.3 (FiveM utilise Lua 5.4 = encore plus rapide) :
 | Query builder (simple) | **0.008 ms** |
 | Cache hit | **0.0002 ms** |
 
-> Toutes les operations courantes sont sous **0.01ms**. Ton serveur ne lag pas.
+> Les requetes sont parametrees et les chargements de relations sont groupes pour limiter les allers-retours vers la base. Mesure les performances sur ta propre charge et ta propre infrastructure.
 
 ---
 
@@ -240,9 +277,10 @@ Benchmarks sur Lua 5.3 (FiveM utilise Lua 5.4 = encore plus rapide) :
 | `Model.create(data)` | Inserer une ligne |
 | `Model.createMany(rows)` | Inserer en masse |
 | `Model.createWith(data)` | Inserer avec relations |
-| `Model.find(where)` | Trouver un enregistrement |
+| `Model.find(where, opts?)` | Trouver un enregistrement (`opts.include` pour les relations) |
 | `Model.findOrFail(where)` | Trouver ou erreur |
-| `Model.findAll(where)` | Trouver tous |
+| `Model.findAll(where, opts?)` | Trouver tous (`opts.include` = eager loading batche) |
+| `Model.all(opts?)` | Toutes les lignes |
 | `Model.first(where?)` | Premier resultat |
 | `Model.exists(where)` | Existe ? |
 | `Model.pluck(col, where?)` | Extraire une colonne |
@@ -278,6 +316,8 @@ Benchmarks sur Lua 5.3 (FiveM utilise Lua 5.4 = encore plus rapide) :
 | `instance:get(relation)` | Charger une relation |
 | `instance:attach(relation, inst)` | Lier (pivot) |
 | `instance:detach(relation, inst)` | Delier (pivot) |
+| `instance:toTable()` | Table propre (safe pour `TriggerClientEvent` / `json.encode`) |
+| `instance:refresh()` | Recharger depuis la base |
 
 </details>
 
@@ -298,6 +338,7 @@ Benchmarks sur Lua 5.3 (FiveM utilise Lua 5.4 = encore plus rapide) :
 | `:whereNull(col)` | IS NULL |
 | `:whereNotNull(col)` | IS NOT NULL |
 | `:whereExists(subSQL)` | EXISTS |
+| `:whereRaw(clause, params?)` | Clause SQL libre (parametree) |
 | `:orderBy(col, dir?)` | Trier |
 | `:orderByDesc(col)` | Trier DESC |
 | `:orderByAsc(col)` | Trier ASC |
@@ -333,7 +374,7 @@ Dans la console txAdmin :
 orvexstudio
 ```
 
-Le studio lit automatiquement ton `mysql_connection_string`, genere un token secret, et affiche l'URL securisee :
+Le studio genere un token secret (ou utilise `orvex_studio_token` s'il contient au moins 32 caracteres) et affiche l'URL d'acces :
 ```
 http://localhost:30120/orvexorm/?token=a1b2c3d4...
 ```
@@ -341,9 +382,15 @@ http://localhost:30120/orvexorm/?token=a1b2c3d4...
 - Voir toutes les tables et leur schema
 - Parcourir, filtrer et trier les donnees
 - Ajouter, modifier et supprimer des lignes
-- Protege par token (seul l'admin console a le lien)
+- Protege par token + verrouillage anti-bruteforce (5 echecs = IP bloquee 5 min)
+- Session en memoire limitee a 30 minutes, sans cookie persistant
+- Fonctionne avec oxmysql **et** mysql-async (meme auto-detection que l'ORM)
 
-> Documentation complete : [Studio](https://orvexorm.yann-dev.fr/docs/guides/studio)
+> **Securite** : l'endpoint est expose sur le port public du serveur (30120). Le token est
+> garde le token uniquement en memoire sauf si tu fournis explicitement `orvex_studio_token`. Arrete le Studio
+> (`orvexstudio stop`) des que tu as fini. Ne partage jamais l'URL.
+>
+> Documentation complete : [Studio](https://slayercode1.github.io/orvexOrm/docs/guides/studio)
 
 ---
 
@@ -356,6 +403,26 @@ http://localhost:30120/orvexorm/?token=a1b2c3d4...
 | mysql-async | Auto-detecte |
 | MySQL | 5.7+ |
 | MariaDB | 10.2+ |
+
+---
+
+## Nouveautes v1.2.0
+
+- **Fix important** : les lectures via l'API globale oxmysql (`MySQL.prepare`) pouvaient
+  renvoyer une ligne "aplatie" au lieu d'un tableau de lignes — `find()`/`findAll()`
+  utilisent maintenant `MySQL.query`. Sous mysql-async, `create()` recupere desormais
+  le vrai `insertId`.
+- **Eager loading batche** : `findAll(where, { include = {...} })` charge chaque relation
+  en 1 seule requete `IN (...)` au lieu d'une requete par ligne.
+- **`countByRelation`** : une seule requete `GROUP BY` au lieu de N requetes COUNT.
+- **`instance:toTable()`** : copie propre sans champs internes, safe pour
+  `TriggerClientEvent` et `json.encode`.
+- **`instance:refresh()`**, **`Model.all()`**, **`Builder:whereRaw()`**,
+  **`OrvexORM.cacheStats()`**.
+- **Cache** : les lignes en cache ne sont plus mutees par le decodage JSON (corruption
+  possible en cas de hits repetes) ; compteurs hits/misses.
+- **`upsert`** avec `timestamps = true` ne reecrase plus `created_at` sur les doublons.
+- **Studio** : anti-bruteforce par IP, compatible mysql-async, garde-fous supplementaires.
 
 ---
 

@@ -60,15 +60,20 @@ promise = {
 
 Citizen = { Await = function(p) return p._value end }
 
+local function _mock_query(query, params, cb)
+    _db_log[#_db_log + 1] = { sql = query, params = params }
+    local result = _mock_results[#_db_log]
+    if result then cb(result)
+    elseif query:match("^INSERT") then cb(1)
+    elseif query:match("^SELECT") then cb({})
+    else cb(1) end
+end
+
 MySQL = {
-    prepare = function(query, params, cb)
-        _db_log[#_db_log + 1] = { sql = query, params = params }
-        local result = _mock_results[#_db_log]
-        if result then cb(result)
-        elseif query:match("^INSERT") then cb(1)
-        elseif query:match("^SELECT") then cb({})
-        else cb(1) end
-    end,
+    prepare = _mock_query,
+    query = _mock_query,
+    insert = _mock_query,
+    update = _mock_query,
     transaction = function(queries, cb)
         _tx_log[#_tx_log + 1] = queries
         cb(true)
@@ -127,6 +132,7 @@ dofile("utils/helpers.lua")
 dofile("utils/serializer.lua")
 dofile("utils/validator.lua")
 dofile("utils/cache.lua")
+dofile("utils/errors.lua")
 dofile("utils/logger.lua")
 
 dofile("database/mysql.lua")
@@ -150,6 +156,7 @@ assert_eq(type(OrvexHelpers), "table", "OrvexHelpers is a table")
 assert_eq(type(OrvexSerializer), "table", "OrvexSerializer is a table")
 assert_eq(type(OrvexValidator), "table", "OrvexValidator is a table")
 assert_eq(type(OrvexCache), "table", "OrvexCache is a table")
+assert_eq(type(OrvexErrors), "table", "OrvexErrors is a table")
 assert_eq(type(OrvexLogger), "table", "OrvexLogger is a table")
 assert_eq(type(OrvexMySQLDriver), "table", "OrvexMySQLDriver is a table")
 assert_eq(type(OrvexAdapter), "table", "OrvexAdapter is a table")

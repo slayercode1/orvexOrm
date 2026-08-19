@@ -11,11 +11,11 @@ const config: Config = {
     v4: true,
   },
 
-  url: 'https://orvexorm.yann-dev.fr',
-  baseUrl: '/',
+  url: 'https://slayercode1.github.io',
+  baseUrl: '/orvexOrm/',
 
-  organizationName: 'orvex',
-  projectName: 'orvexorm',
+  organizationName: 'slayercode1',
+  projectName: 'orvexOrm',
 
   onBrokenLinks: 'throw',
 
@@ -56,7 +56,7 @@ const config: Config = {
           lastVersion: 'current',
           versions: {
             current: {
-              label: '1.0.0',
+              label: '1.2.0',
               badge: true,
             },
           },

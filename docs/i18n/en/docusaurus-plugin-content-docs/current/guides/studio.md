@@ -6,6 +6,8 @@ sidebar_position: 11
 
 OrvexORM Studio is a **web interface** that lets you visualize and manage your database directly from your browser. Like Prisma Studio, but for FiveM. **Zero dependencies, 100% Lua.**
 
+The studio works with both **oxmysql** and **mysql-async**: its queries are routed through the ORM adapter, so whichever library your server uses is fine.
+
 ## Launch
 
 No installation required. The studio is built directly into the orvexorm resource.
@@ -19,10 +21,9 @@ orvexstudio
 ```
 
 The studio will:
-1. Automatically read the `mysql_connection_string` from your `server.cfg`
-2. Generate a **secret security token**
-3. Start the built-in web server
-4. Display the secure URL in the console
+1. Generate a **secret token** from the operating system's random source, or use `orvex_studio_token` when it contains at least 32 characters
+2. Enable the resource's built-in web routes
+3. Display the access URL in the console
 
 ```
 ══════════════════════════════════════════════════
@@ -53,14 +54,17 @@ Port `30120` is the FiveM HTTP port (same as your server).
 
 ## Security
 
-The studio is protected by a **random token** generated on each launch. Only people who can see the txAdmin console have access to the URL.
+The studio is protected by a **random token** regenerated on every start. If the operating system random source is unavailable, startup fails instead of creating a predictable token. You can provide a stable token with `set orvex_studio_token "..."`; it must contain at least 32 characters.
 
-- The token is in the URL: `http://localhost:30120/orvexorm/?token=...`
-- After the first connection, a cookie is set (valid 24h)
+- The initial token is carried in the URL, then removed from the address bar and sent in the `X-Studio-Token` header
+- No authentication cookie is created
+- The token expires after **30 minutes**; run `orvexstudio` again to start a new session
 - Without the token, all requests return `403 Access Denied`
+- **Brute-force protection**: an IP is locked out for 5 minutes after 5 invalid tokens
+- Requests are limited to **120 per minute per address**, and request bodies to **1 MiB**
 
 :::caution
-OrvexORM Studio is a **development tool**. Never expose it on a publicly accessible server. It gives full access to your database.
+OrvexORM Studio is a **development tool** that gives full access to your database. The endpoint is exposed on the **public game port 30120**, so anyone who obtains the URL can reach it. The token is regenerated on every start, but the safest habit is to stop the studio (`orvexstudio stop`) as soon as you're done.
 :::
 
 ## Features
@@ -78,7 +82,7 @@ The left panel displays all tables in your database with the row count. Click on
 ### Edit data
 
 - **Add a row**: click "Add Row", fill in the form, and submit
-- **Edit a row**: click on a row to open the editor
+- **Edit a row**: use the row's edit button to open the editor
 - **Delete a row**: click the delete button (with confirmation)
 
 Form fields automatically adapt to the column type:

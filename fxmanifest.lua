@@ -2,7 +2,7 @@ fx_version 'cerulean'
 game 'common'
 
 name 'orvexorm'
-version '1.0.0'
+version '1.2.0'
 author 'Orvex'
 description 'Lightweight ORM for FiveM built on oxmysql or mysql-async'
 
@@ -11,6 +11,7 @@ server_scripts {
     'utils/serializer.lua',
     'utils/validator.lua',
     'utils/cache.lua',
+    'utils/errors.lua',
     'utils/logger.lua',
 
     'database/mysql.lua',

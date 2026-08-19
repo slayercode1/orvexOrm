@@ -135,6 +135,29 @@ OrvexORM.flushCache()
 
 ---
 
+## `ORM.cacheStats()`
+
+Retourne les statistiques du cache global.
+
+### Retour
+
+| Champ | Type | Description |
+|---|---|---|
+| `hits` | `number` | Nombre de lectures servies depuis le cache |
+| `misses` | `number` | Nombre de lectures qui ont interroge la base |
+| `hitRate` | `number` | Ratio hits / (hits + misses) |
+| `entries` | `number` | Nombre d'entrees actuellement en cache |
+
+### Exemple
+
+```lua
+local stats = OrvexORM.cacheStats()
+print(("Cache : %d hits, %d misses (%.0f%%), %d entrees")
+    :format(stats.hits, stats.misses, stats.hitRate * 100, stats.entries))
+```
+
+---
+
 ## `ORM.setAdapter(adapter)`
 
 Remplace l'adaptateur de base de donnees par defaut.

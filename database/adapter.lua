@@ -29,6 +29,8 @@ function Adapter:scalar(query, params)
 end
 
 --- Fallback: execute queries one by one if driver lacks transaction support.
+--- WARNING: this fallback is NOT atomic — a failing query does not roll back
+--- the previous ones. Drivers should implement :transaction() whenever possible.
 ---@param queries OrvexTransactionQuery[]
 ---@return boolean success
 function Adapter:transaction(queries)
@@ -36,7 +38,8 @@ function Adapter:transaction(queries)
         return self.driver:transaction(queries)
     end
     for _, q in ipairs(queries) do
-        self.driver:scalar(q.query, q.values)
+        local ok = pcall(self.driver.scalar, self.driver, q.query, q.values)
+        if not ok then return false end
     end
     return true
 end

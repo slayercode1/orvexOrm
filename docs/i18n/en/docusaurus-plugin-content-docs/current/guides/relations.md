@@ -296,6 +296,29 @@ print(player.profile.bio)
 print(#player.vehicles)
 ```
 
+`findAll` (and `all`) also accept `include`. Relations are loaded in **batch**: a single `WHERE fk IN (...)` query per relation, no matter how many rows are returned (no N+1 problem).
+
+```lua
+local cops = User.findAll({ job = "police" }, {
+    include = { "vehicles" }
+})
+-- 2 queries total: 1 for the users, 1 for all their vehicles
+
+for _, cop in ipairs(cops) do
+    print(cop.identifier .. " has " .. #cop.vehicles .. " vehicle(s)")
+end
+```
+
+**Generated SQL:**
+```sql
+SELECT * FROM users WHERE job = ?
+SELECT * FROM vehicles WHERE owner_id IN (?, ?, ?)
+```
+
+:::info
+Batched loading works for `hasOne`, `hasMany`, and `belongsTo`. For `belongsToMany`, relations are loaded per instance.
+:::
+
 ---
 
 ## whereHas — Filter by relation
@@ -328,7 +351,7 @@ SELECT * FROM users WHERE EXISTS (
 
 ## countByRelation — Count relations
 
-Counts how many related records each parent has.
+Counts how many related records each parent has. A single `GROUP BY` query is used, no matter how many parents there are.
 
 ```lua
 local results = User.countByRelation("vehicles")
@@ -388,7 +411,7 @@ Vehicle.create({ owner_id = "license:abc", plate = "XYZ789", model = "adder" })
 
 | Advanced feature | Method | Description |
 |---|---|---|
-| Eager Loading | `Model.find(where, { include = {...} })` | Loads relations automatically |
+| Eager Loading | `Model.find/findAll(where, { include = {...} })` | Loads relations automatically (batched on `findAll`) |
 | Filter by relation | `Model.whereHas("relation")` | WHERE EXISTS |
 | Count relations | `Model.countByRelation("relation")` | Counts the links |
 | Nested Writes | `Model.createWith(data)` | Creates parent + children |

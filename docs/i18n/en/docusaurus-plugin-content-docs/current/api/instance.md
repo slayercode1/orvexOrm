@@ -168,3 +168,39 @@ Restores a soft-deleted row. Requires `softDelete = true`.
 player:restore()
 print(player.deleted_at)  -- nil
 ```
+
+---
+
+### `instance:toTable()` → `table`
+
+Returns a plain copy of the instance, without internal fields (`_tableName`, `_adapter`, ...) or metatable. Eager-loaded relations are converted recursively.
+
+The main use case: sending an instance to clients via `TriggerClientEvent` or serializing it with `json.encode`.
+
+```lua
+local player = User.find({ identifier = "license:abc" }, { include = { "vehicles" } })
+
+-- Safe to send to the client
+TriggerClientEvent("myresource:playerData", src, player:toTable())
+
+-- Safe to serialize
+local json = json.encode(player:toTable())
+```
+
+---
+
+### `instance:refresh()` → `boolean`
+
+Reloads the instance's columns from the database. Returns `false` if the row no longer exists, `true` otherwise. JSON fields are re-decoded.
+
+```lua
+local player = User.find({ identifier = "license:abc" })
+
+-- ... the row may have been modified elsewhere ...
+
+if player:refresh() then
+    print(player.money)  -- fresh value from the database
+else
+    print("Row no longer exists")
+end
+```

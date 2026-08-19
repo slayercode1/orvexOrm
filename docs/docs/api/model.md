@@ -25,17 +25,22 @@ local player = User.create({ identifier = "license:abc", money = 500 })
 
 ---
 
-### `Model.find(where)` → `OrvexInstance | nil`
+### `Model.find(where, opts?)` → `OrvexInstance | nil`
 
-Retourne la premiere ligne correspondante, ou `nil`.
+Retourne la premiere ligne correspondante, ou `nil`. Accepte `opts.include` pour charger des relations en meme temps (eager loading).
 
 ```lua
 local player = User.find({ identifier = "license:abc" })
+
+-- Avec eager loading
+local player = User.find({ identifier = "license:abc" }, {
+    include = { "profile", "vehicles" }
+})
 ```
 
 ---
 
-### `Model.findAll(where)` → `OrvexInstance[]`
+### `Model.findAll(where, opts?)` → `OrvexInstance[]`
 
 Retourne toutes les lignes correspondantes.
 
@@ -43,11 +48,37 @@ Retourne toutes les lignes correspondantes.
 local cops = User.findAll({ job = "police" })
 ```
 
+Avec `opts.include`, les relations sont chargees en **eager loading batche** : une seule requete `WHERE fk IN (...)` par relation, quel que soit le nombre de resultats (pas de probleme N+1). Fonctionne pour `hasOne`, `hasMany` et `belongsTo` (`belongsToMany` retombe sur un chargement par instance).
+
+```lua
+local cops = User.findAll({ job = "police" }, {
+    include = { "profile", "vehicles" }
+})
+
+for _, cop in ipairs(cops) do
+    print(cop.profile.bio)   -- deja charge
+    print(#cop.vehicles)     -- deja charge
+end
+```
+
+---
+
+### `Model.all(opts?)` → `OrvexInstance[]`
+
+Retourne toutes les lignes de la table. Raccourci pour `Model.findAll({}, opts)`.
+
+```lua
+local everyone = User.all()
+
+-- Avec eager loading
+local everyone = User.all({ include = { "vehicles" } })
+```
+
 ---
 
 ### `Model.upsert(data)` → `boolean`
 
-Insere ou met a jour si la cle primaire existe deja.
+Insere ou met a jour si la cle primaire existe deja. Avec `timestamps = true`, `created_at` n'est **pas** reecrase sur les lignes existantes : seuls les autres champs sont mis a jour via `ON DUPLICATE KEY UPDATE`.
 
 ```lua
 User.upsert({ identifier = "license:abc", money = 2000 })
@@ -285,7 +316,7 @@ SELECT * FROM users WHERE EXISTS (
 
 ### `Model.countByRelation(relationName, where?)` → `table`
 
-Compte les enregistrements lies pour chaque enregistrement parent.
+Compte les enregistrements lies pour chaque enregistrement parent. Utilise une **seule** requete `GROUP BY` pour compter tous les parents d'un coup (au lieu d'un `COUNT` par parent).
 
 ```lua
 local results = User.countByRelation("vehicles", { job = "police" })

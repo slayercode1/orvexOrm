@@ -5,18 +5,102 @@
 
 local studioActive = false
 local studioToken = nil
-local studioPort = nil
+local studioTokenExpiresAt = 0
+local Errors = OrvexErrors or require("utils.errors")
+local Logger = OrvexLogger or require("utils.logger")
+
+-- ─── Brute-force protection ─────────────────────────────────────────
+
+local MAX_FAILED_ATTEMPTS = 5
+local LOCKOUT_SECONDS = 300
+local TOKEN_LIFETIME_SECONDS = 1800
+local MAX_BODY_BYTES = 1024 * 1024
+local REQUEST_WINDOW_SECONDS = 60
+local MAX_REQUESTS_PER_WINDOW = 120
+
+---@type table<string, { count: integer, lockedUntil: number }>
+local failedAttempts = {}
+local requestWindows = {}
+
+local function boundedSet(store, key, value)
+    local count = 0
+    for _ in pairs(store) do
+        count = count + 1
+        if count >= 2048 then
+            for existing in pairs(store) do store[existing] = nil end
+            break
+        end
+    end
+    store[key] = value
+end
+
+---@param address string
+---@return boolean
+local function isLockedOut(address)
+    local entry = failedAttempts[address]
+    if not entry then return false end
+    if entry.lockedUntil > 0 and os.time() < entry.lockedUntil then
+        return true
+    end
+    if entry.lockedUntil > 0 then
+        failedAttempts[address] = nil
+    end
+    return false
+end
+
+---@param address string
+local function registerFailure(address)
+    local entry = failedAttempts[address] or { count = 0, lockedUntil = 0 }
+    entry.count = entry.count + 1
+    if entry.count >= MAX_FAILED_ATTEMPTS then
+        entry.lockedUntil = os.time() + LOCKOUT_SECONDS
+        print(("^1[OrvexORM Studio] %s locked out after %d failed token attempts.^0"):format(address, entry.count))
+    end
+    boundedSet(failedAttempts, address, entry)
+end
 
 -- ─── Token generation ──────────────────────────────────────────────
 
+local function configuredToken()
+    if type(GetConvar) ~= "function" then return nil end
+    local token = GetConvar("orvex_studio_token", "")
+    if #token >= 32 then return token end
+    return nil
+end
+
 local function generateToken()
-    local chars = "abcdefghijklmnopqrstuvwxyz0123456789"
-    local t = {}
-    for i = 1, 48 do
-        local idx = math.random(1, #chars)
-        t[i] = chars:sub(idx, idx)
+    local provided = configuredToken()
+    if provided then return provided end
+
+    local source = io.open("/dev/urandom", "rb")
+    if not source then
+        return nil, "Secure randomness is unavailable. Set orvex_studio_token to at least 32 random characters."
     end
-    return table.concat(t)
+    local bytes = source:read(32)
+    source:close()
+    if not bytes or #bytes ~= 32 then return nil, "Secure token generation failed." end
+    return (bytes:gsub(".", function(byte) return ("%02x"):format(byte:byte()) end))
+end
+
+local function constantTimeEquals(left, right)
+    if type(left) ~= "string" or type(right) ~= "string" then return false end
+    local difference = #left ~ #right
+    local length = math.max(#left, #right)
+    for index = 1, length do
+        difference = difference | ((left:byte(index) or 0) ~ (right:byte(index) or 0))
+    end
+    return difference == 0
+end
+
+local function exceedsRequestLimit(address)
+    local now = os.time()
+    local window = requestWindows[address]
+    if not window or now - window.startedAt >= REQUEST_WINDOW_SECONDS then
+        boundedSet(requestWindows, address, { startedAt = now, count = 1 })
+        return false
+    end
+    window.count = window.count + 1
+    return window.count > MAX_REQUESTS_PER_WINDOW
 end
 
 -- ─── JSON encoder (minimal, for API responses) ────────────────────
@@ -73,38 +157,39 @@ local function safeName(name)
     return "`" .. name .. "`"
 end
 
--- ─── DB query helpers (uses oxmysql sync exports) ──────────────────
+-- ─── DB query helpers ───────────────────────────────────────────────
+-- Routed through the ORM adapter, so the Studio works with both
+-- oxmysql and mysql-async (same auto-detection as the ORM itself).
 
 local function dbQuery(sql, params)
-    local ok, result = pcall(exports.oxmysql.executeSync, exports.oxmysql, sql, params or {})
+    local ok, result = pcall(OrvexORM.raw, sql, params or {})
     if ok then return result end
-    return nil, result
+    error(Errors.new("INTERNAL_ERROR", tostring(result)))
 end
 
 local function dbScalar(sql, params)
-    local ok, result = pcall(exports.oxmysql.executeSync, exports.oxmysql, sql, params or {})
+    local ok, result = pcall(OrvexORM.raw, sql, params or {})
     if ok and type(result) == "table" and result[1] then return result[1] end
     if ok then return result end
-    return nil, result
+    error(Errors.new("INTERNAL_ERROR", tostring(result)))
 end
 
 local function dbInsert(sql, params)
-    local ok, result = pcall(exports.oxmysql.insertSync, exports.oxmysql, sql, params or {})
+    local ok, result = pcall(OrvexORM.rawExec, sql, params or {})
     if ok then return result end
-    return nil, result
+    error(Errors.new("INTERNAL_ERROR", tostring(result)))
 end
 
 local function dbUpdate(sql, params)
-    local ok, result = pcall(exports.oxmysql.updateSync, exports.oxmysql, sql, params or {})
+    local ok, result = pcall(OrvexORM.rawExec, sql, params or {})
     if ok then return result end
-    return nil, result
+    error(Errors.new("INTERNAL_ERROR", tostring(result)))
 end
 
 -- ─── API handlers ──────────────────────────────────────────────────
 
 local function apiTables()
     local rows = dbQuery("SHOW TABLES")
-    if not rows then return jsonEncode({ error = "Failed to fetch tables" }) end
     local tables = {}
     for _, row in ipairs(rows) do
         for _, v in pairs(row) do
@@ -112,31 +197,34 @@ local function apiTables()
             break
         end
     end
-    return jsonEncode({ tables = tables })
+    return { tables = tables }
 end
 
 local function apiSchema(tableName)
     local tn = safeName(tableName)
-    if not tn then return jsonEncode({ error = "Invalid table name" }) end
+    if not tn then error(Errors.new("VALIDATION_ERROR", "Invalid table name")) end
     local rows = dbQuery("DESCRIBE " .. tn)
-    if not rows then return jsonEncode({ error = "Table not found" }) end
-    return jsonEncode({ schema = rows })
+    if not rows then error(Errors.new("NOT_FOUND", "Table not found")) end
+    return { schema = rows }
 end
 
 local function apiCount(tableName)
     local tn = safeName(tableName)
-    if not tn then return jsonEncode({ error = "Invalid table name" }) end
+    if not tn then error(Errors.new("VALIDATION_ERROR", "Invalid table name")) end
     local row = dbScalar("SELECT COUNT(*) as cnt FROM " .. tn)
     local cnt = row and (row.cnt or row["COUNT(*)"]) or 0
-    return jsonEncode({ count = tonumber(cnt) or 0 })
+    return { count = tonumber(cnt) or 0 }
 end
 
 local function apiRows(tableName, params)
     local tn = safeName(tableName)
-    if not tn then return jsonEncode({ error = "Invalid table name" }) end
+    if not tn then error(Errors.new("VALIDATION_ERROR", "Invalid table name")) end
 
     local page = tonumber(params.page) or 1
-    local perPage = math.min(100, math.max(1, tonumber(params.perPage) or 25))
+    local perPage = tonumber(params.perPage) or 25
+    if page < 1 or page % 1 ~= 0 then error(Errors.new("VALIDATION_ERROR", "Page must be a positive integer")) end
+    if perPage < 1 or perPage % 1 ~= 0 then error(Errors.new("VALIDATION_ERROR", "Page size must be a positive integer")) end
+    perPage = math.min(100, perPage)
     local offset = (page - 1) * perPage
 
     local orderClause = ""
@@ -159,6 +247,7 @@ local function apiRows(tableName, params)
             else
                 whereClause = " WHERE " .. col .. " " .. op .. " ?"
                 local val = params.filter_val or ""
+                if #val > 512 then error(Errors.new("VALIDATION_ERROR", "Filter value is too long")) end
                 whereParams[1] = op == "LIKE" and ("%" .. val .. "%") or val
             end
         end
@@ -170,18 +259,18 @@ local function apiRows(tableName, params)
     qParams[#qParams + 1] = perPage
     qParams[#qParams + 1] = offset
 
-    local rows = dbQuery(sql, qParams) or {}
+    local rows = dbQuery(sql, qParams)
 
     local countRow = dbScalar("SELECT COUNT(*) as cnt FROM " .. tn .. whereClause, whereParams)
     local total = countRow and (tonumber(countRow.cnt) or tonumber(countRow["COUNT(*)"])) or 0
 
-    return jsonEncode({ rows = rows, total = total, page = page, perPage = perPage })
+    return { rows = rows, total = total, page = page, perPage = perPage }
 end
 
 local function apiInsert(tableName, body)
     local tn = safeName(tableName)
-    if not tn then return jsonEncode({ error = "Invalid table name" }) end
-    if not body or type(body) ~= "table" then return jsonEncode({ error = "No data" }) end
+    if not tn then error(Errors.new("VALIDATION_ERROR", "Invalid table name")) end
+    if not body or type(body) ~= "table" then error(Errors.new("VALIDATION_ERROR", "Missing JSON body")) end
 
     local cols, vals, placeholders = {}, {}, {}
     for k, v in pairs(body) do
@@ -192,21 +281,22 @@ local function apiInsert(tableName, body)
             placeholders[#placeholders + 1] = "?"
         end
     end
-    if #cols == 0 then return jsonEncode({ error = "No valid columns" }) end
+    if #cols == 0 then error(Errors.new("VALIDATION_ERROR", "No valid columns")) end
 
     local sql = "INSERT INTO " .. tn .. " (" .. table.concat(cols, ", ") .. ") VALUES (" .. table.concat(placeholders, ", ") .. ")"
-    local id, err = dbInsert(sql, vals)
-    if err then return jsonEncode({ error = tostring(err) }) end
-    return jsonEncode({ success = true, insertId = id })
+    local id = dbInsert(sql, vals)
+    return { success = true, insertId = id }
 end
 
 local function apiUpdate(tableName, body)
     local tn = safeName(tableName)
-    if not tn then return jsonEncode({ error = "Invalid table name" }) end
-    if not body or not body.pk or not body.data then return jsonEncode({ error = "Missing pk or data" }) end
+    if not tn then error(Errors.new("VALIDATION_ERROR", "Invalid table name")) end
+    if not body or not body.pk or not body.data then error(Errors.new("VALIDATION_ERROR", "Missing pk or data")) end
 
     local pkCol = safeName(body.pk)
-    if not pkCol then return jsonEncode({ error = "Invalid pk" }) end
+    if not pkCol then error(Errors.new("VALIDATION_ERROR", "Invalid primary key")) end
+
+    if body.pkValue == nil then error(Errors.new("VALIDATION_ERROR", "Missing primary key value")) end
 
     local setClauses, vals = {}, {}
     for k, v in pairs(body.data) do
@@ -216,35 +306,30 @@ local function apiUpdate(tableName, body)
             vals[#vals + 1] = v
         end
     end
+    if #setClauses == 0 then error(Errors.new("VALIDATION_ERROR", "No valid columns")) end
     vals[#vals + 1] = body.pkValue
 
     local sql = "UPDATE " .. tn .. " SET " .. table.concat(setClauses, ", ") .. " WHERE " .. pkCol .. " = ?"
-    local affected, err = dbUpdate(sql, vals)
-    if err then return jsonEncode({ error = tostring(err) }) end
-    return jsonEncode({ success = true, affectedRows = affected })
+    local affected = dbUpdate(sql, vals)
+    return { success = true, affectedRows = affected }
 end
 
 local function apiDelete(tableName, body)
     local tn = safeName(tableName)
-    if not tn then return jsonEncode({ error = "Invalid table name" }) end
-    if not body or not body.pk then return jsonEncode({ error = "Missing pk" }) end
+    if not tn then error(Errors.new("VALIDATION_ERROR", "Invalid table name")) end
+    if not body or not body.pk then error(Errors.new("VALIDATION_ERROR", "Missing primary key")) end
 
     local pkCol = safeName(body.pk)
-    if not pkCol then return jsonEncode({ error = "Invalid pk" }) end
+    if not pkCol then error(Errors.new("VALIDATION_ERROR", "Invalid primary key")) end
+    if body.pkValue == nil then error(Errors.new("VALIDATION_ERROR", "Missing primary key value")) end
 
     local sql = "DELETE FROM " .. tn .. " WHERE " .. pkCol .. " = ? LIMIT 1"
-    local affected, err = dbUpdate(sql, { body.pkValue })
-    if err then return jsonEncode({ error = tostring(err) }) end
-    return jsonEncode({ success = true, affectedRows = affected })
+    local affected = dbUpdate(sql, { body.pkValue })
+    return { success = true, affectedRows = affected }
 end
 
 local function apiConnection()
-    local connStr = GetConvar("mysql_connection_string", "")
-    local host, db, user = "unknown", "unknown", "unknown"
-    -- Parse mysql://user:pass@host/database
-    local u, h, d = connStr:match("mysql://([^:]+):[^@]+@([^/]+)/([^?]+)")
-    if u then user, host, db = u, h, d end
-    return jsonEncode({ host = host, database = db, user = user })
+    return { connected = true }
 end
 
 -- ─── URL query string parser ───────────────────────────────────────
@@ -253,6 +338,7 @@ local function parseQuery(queryString)
     local params = {}
     if not queryString then return params end
     for k, v in queryString:gmatch("([^&=]+)=([^&]*)") do
+        v = v:gsub("%+", " ")
         params[k] = v:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)
     end
     return params
@@ -273,14 +359,89 @@ end
 
 -- ─── HTTP Handler ──────────────────────────────────────────────────
 
+local function correlationIdFrom(req)
+    local headers = req.headers or {}
+    local supplied = headers["x-correlation-id"] or headers["X-Correlation-Id"]
+    if type(supplied) == "string" and supplied:match("^[%w%-_]+$") and #supplied <= 80 then return supplied end
+    return Errors.generateId("REQ")
+end
+
+local function sendJson(res, status, payload, correlationId)
+    res.writeHead(status, {
+        ["Content-Type"] = "application/json; charset=utf-8",
+        ["Cache-Control"] = "no-store",
+        ["X-Correlation-Id"] = correlationId,
+        ["X-Content-Type-Options"] = "nosniff",
+        ["X-Frame-Options"] = "DENY",
+        ["Referrer-Policy"] = "no-referrer",
+    })
+    res.send(jsonEncode(payload))
+end
+
+local function sendError(res, thrown, context)
+    local appError = Errors.normalize(thrown)
+    local errorId = appError.status >= 500 and Errors.generateId("ERR") or nil
+    local logContext = {
+        errorId = errorId,
+        correlationId = context.correlationId,
+        errorCode = appError.code,
+        route = context.route,
+        method = context.method,
+        technicalMessage = appError.technicalMessage,
+        stack = context.stack,
+    }
+    if appError.level == "error" then Logger.error("Studio request failed", logContext)
+    elseif appError.level == "warn" then Logger.warn("Studio request rejected", logContext) end
+    sendJson(res, appError.status, Errors.toResponse(appError, errorId), context.correlationId)
+end
+
+local function dispatchApi(path, method, params, body)
+    if path == "/api/tables" and method == "GET" then return apiTables() end
+    local tableName = path:match("^/api/tables/([^/]+)/schema$")
+    if tableName and method == "GET" then return apiSchema(tableName) end
+    tableName = path:match("^/api/tables/([^/]+)/count$")
+    if tableName and method == "GET" then return apiCount(tableName) end
+    tableName = path:match("^/api/tables/([^/]+)/rows$")
+    if tableName and method == "GET" then return apiRows(tableName, params) end
+    if tableName and method == "POST" then return apiInsert(tableName, body) end
+    if tableName and method == "PUT" then return apiUpdate(tableName, body) end
+    if tableName and method == "DELETE" then return apiDelete(tableName, body) end
+    if path == "/api/connection" and method == "GET" then return apiConnection() end
+    error(Errors.new("NOT_FOUND", "Unknown Studio route"))
+end
+
 local function handleRequest(req, res)
+    local correlationId = correlationIdFrom(req)
     if not studioActive then
-        res.send(jsonEncode({ error = "Studio not active" }))
+        sendError(res, Errors.new("SERVICE_UNAVAILABLE", "Studio is inactive"), {
+            correlationId = correlationId, route = req.path, method = req.method,
+        })
+        return
+    end
+
+    -- Strip the port so lockouts apply per host, not per connection
+    local address = (req.address or "unknown"):match("^(.-):%d+$") or req.address or "unknown"
+    if exceedsRequestLimit(address) then
+        sendError(res, Errors.new("RATE_LIMITED", "Studio request rate exceeded"), {
+            correlationId = correlationId, route = req.path, method = req.method,
+        })
+        return
+    end
+    if isLockedOut(address) then
+        sendError(res, Errors.new("RATE_LIMITED", "Studio token lockout"), {
+            correlationId = correlationId, route = req.path, method = req.method,
+        })
         return
     end
 
     local path = req.path or "/"
     local method = req.method or "GET"
+    if #path > 2048 then
+        sendError(res, Errors.new("VALIDATION_ERROR", "Request path exceeds the size limit"), {
+            correlationId = correlationId, route = "[oversized]", method = method,
+        })
+        return
+    end
 
     -- Parse query string
     local queryString = ""
@@ -291,45 +452,62 @@ local function handleRequest(req, res)
     local params = parseQuery(queryString)
 
     -- Token check
-    local urlToken = params.token
-    if not urlToken or urlToken ~= studioToken then
-        res.writeHead(403, { ["Content-Type"] = "application/json" })
-        res.send(jsonEncode({ error = "Access denied. Invalid or missing token." }))
+    local headers = req.headers or {}
+    local requestToken = headers["x-studio-token"] or headers["X-Studio-Token"] or params.token
+    if os.time() >= studioTokenExpiresAt then
+        studioActive = false
+        studioToken = nil
+        sendError(res, Errors.new("AUTHENTICATION_REQUIRED", "Studio token expired"), {
+            correlationId = correlationId, route = path, method = method,
+        })
         return
     end
+    if not constantTimeEquals(requestToken, studioToken) then
+        registerFailure(address)
+        sendError(res, Errors.new("FORBIDDEN", "Invalid or missing Studio token"), {
+            correlationId = correlationId, route = path, method = method,
+        })
+        return
+    end
+    failedAttempts[address] = nil
 
     -- Route: frontend
     if path == "/" or path == "" then
-        res.writeHead(200, { ["Content-Type"] = "text/html; charset=utf-8" })
+        res.writeHead(200, {
+            ["Content-Type"] = "text/html; charset=utf-8",
+            ["Cache-Control"] = "no-store",
+            ["Content-Security-Policy"] = "default-src 'none'; connect-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+            ["X-Content-Type-Options"] = "nosniff",
+            ["X-Frame-Options"] = "DENY",
+            ["Referrer-Policy"] = "no-referrer",
+            ["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()",
+        })
         res.send(getStudioHTML())
         return
     end
 
-    -- API routes
-    res.writeHead(200, { ["Content-Type"] = "application/json" })
-
-    if path == "/api/tables" and method == "GET" then
-        res.send(apiTables())
-    elseif path:match("^/api/tables/([^/]+)/schema$") then
-        res.send(apiSchema(path:match("^/api/tables/([^/]+)/schema$")))
-    elseif path:match("^/api/tables/([^/]+)/count$") then
-        res.send(apiCount(path:match("^/api/tables/([^/]+)/count$")))
-    elseif path:match("^/api/tables/([^/]+)/rows$") and method == "GET" then
-        res.send(apiRows(path:match("^/api/tables/([^/]+)/rows$"), params))
-    elseif path:match("^/api/tables/([^/]+)/rows$") and method == "POST" then
-        local body = jsonDecode(req.body)
-        res.send(apiInsert(path:match("^/api/tables/([^/]+)/rows$"), body))
-    elseif path:match("^/api/tables/([^/]+)/rows$") and method == "PUT" then
-        local body = jsonDecode(req.body)
-        res.send(apiUpdate(path:match("^/api/tables/([^/]+)/rows$"), body))
-    elseif path:match("^/api/tables/([^/]+)/rows$") and method == "DELETE" then
-        local body = jsonDecode(req.body)
-        res.send(apiDelete(path:match("^/api/tables/([^/]+)/rows$"), body))
-    elseif path == "/api/connection" then
-        res.send(apiConnection())
-    else
-        res.send(jsonEncode({ error = "Not found" }))
+    local hasBody = method == "POST" or method == "PUT" or method == "DELETE"
+    if hasBody and type(req.body) == "string" and #req.body > MAX_BODY_BYTES then
+        sendError(res, Errors.new("VALIDATION_ERROR", "Studio request body exceeds the size limit"), {
+            correlationId = correlationId, route = path, method = method,
+        })
+        return
     end
+    local body = hasBody and jsonDecode(req.body) or nil
+    if (method == "POST" or method == "PUT" or method == "DELETE") and req.body and req.body ~= "" and not body then
+        sendError(res, Errors.new("VALIDATION_ERROR", "Malformed JSON body"), {
+            correlationId = correlationId, route = path, method = method,
+        })
+        return
+    end
+
+    local stack
+    local ok, result = xpcall(function() return dispatchApi(path, method, params, body) end, function(thrown)
+        stack = debug and debug.traceback and debug.traceback("", 2) or nil
+        return thrown
+    end)
+    if ok then sendJson(res, 200, result, correlationId)
+    else sendError(res, result, { correlationId = correlationId, route = path, method = method, stack = stack }) end
 end
 
 -- ─── Register HTTP handler ─────────────────────────────────────────
@@ -353,6 +531,9 @@ RegisterCommand("orvexstudio", function(source, args)
         end
         studioActive = false
         studioToken = nil
+        studioTokenExpiresAt = 0
+        failedAttempts = {}
+        requestWindows = {}
         print("^2[OrvexORM Studio]^0 Studio stopped.")
         return
     end
@@ -363,7 +544,14 @@ RegisterCommand("orvexstudio", function(source, args)
     end
 
     -- Activate
-    studioToken = generateToken()
+    local token, tokenError = generateToken()
+    if not token then
+        Logger.error("Studio activation refused", { technicalMessage = tokenError })
+        print("^1[OrvexORM Studio] " .. tokenError .. "^0")
+        return
+    end
+    studioToken = token
+    studioTokenExpiresAt = os.time() + TOKEN_LIFETIME_SECONDS
     studioActive = true
 
     -- Get the resource HTTP endpoint
@@ -377,7 +565,10 @@ RegisterCommand("orvexstudio", function(source, args)
     print("^2  URL : ^6http://localhost:30120/" .. endpoint .. "/?token=" .. studioToken .. "^0")
     print("")
     print("^3  Share this URL only with trusted people.^0")
+    print("^3  The endpoint is reachable on the public game port:^0")
+    print("^3  stop the Studio as soon as you are done.^0")
     print("^3  Type 'orvexstudio stop' to stop.^0")
+    print("^3  This Studio session expires after 30 minutes.^0")
     print("")
     print("^5══════════════════════════════════════════════════^0")
     print("")

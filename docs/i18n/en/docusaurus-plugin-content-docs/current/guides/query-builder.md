@@ -150,6 +150,40 @@ User.query()
 
 ---
 
+## Raw clauses with `:whereRaw()`
+
+Sometimes you need a condition that `:where()` can't express (SQL functions, custom expressions). `:whereRaw()` lets you write the clause yourself. It's wrapped in parentheses and joined by **AND**:
+
+```lua
+-- Police officers, case-insensitive
+User.query()
+    :whereRaw("LOWER(job) = ?", { "police" })
+    :get()
+-- SQL: WHERE (LOWER(job) = ?)
+
+-- Combined with other conditions
+User.query()
+    :where({ job = "police" })
+    :whereRaw("money > ? OR kills > ?", { 1000, 50 })
+    :get()
+-- SQL: WHERE job = ? AND (money > ? OR kills > ?)
+```
+
+:::caution Never concatenate values
+Always pass values through the `params` table (`?` placeholders). **Never** build the clause by string concatenation — that opens the door to SQL injection.
+
+```lua
+-- ❌ DANGEROUS: SQL injection possible
+:whereRaw("job = '" .. input .. "'")
+
+-- ✅ SAFE: value passed as a parameter
+:whereRaw("job = ?", { input })
+```
+
+:::
+
+---
+
 ## Sorting with `:orderBy()`
 
 ```lua

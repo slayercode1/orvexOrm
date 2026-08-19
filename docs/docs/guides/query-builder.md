@@ -154,6 +154,31 @@ User.query():whereLike("name", "%john%"):get()
 
 ---
 
+## SQL libre avec `:whereRaw()`
+
+Quand aucune methode ne couvre ton besoin, `:whereRaw(clause, params?)` te permet d'ecrire une clause SQL libre. Elle est entouree de parentheses et combinee en **AND** avec les autres conditions.
+
+```lua
+-- Fonction SQL dans la condition
+User.query()
+    :whereRaw("LOWER(job) = ?", { "police" })
+    :get()
+-- SQL: WHERE (LOWER(job) = ?)
+
+-- OR imbrique dans un groupe
+User.query()
+    :where({ status = "active" })
+    :whereRaw("money > ? OR job = ?", { 10000, "police" })
+    :get()
+-- SQL: WHERE status = ? AND (money > ? OR job = ?)
+```
+
+:::caution Injection SQL
+Passe **toujours** les valeurs via `params`, jamais par concatenation de chaine. `:whereRaw("name = '" .. input .. "'")` est une porte ouverte a l'injection SQL.
+:::
+
+---
+
 ## OR WHERE (ou)
 
 Par defaut, les conditions sont reliees par **AND**. Pour utiliser **OR** :

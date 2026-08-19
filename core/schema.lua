@@ -7,6 +7,7 @@
 ---@field fields table<string, OrvexFieldType>
 ---@field fieldNames string[]
 ---@field decodeFields table[]
+---@field encodeSet table<string, boolean>
 local Schema = {}
 Schema.__index = Schema
 
@@ -19,11 +20,13 @@ function Schema.new(fields)
     self.fields = fields
     self.fieldNames = {}
     self.decodeFields = {}
+    self.encodeSet = {}
 
     for name, fieldType in pairs(fields) do
         self.fieldNames[#self.fieldNames + 1] = name
         if fieldType == "json" or fieldType == "auto" then
             self.decodeFields[#self.decodeFields + 1] = { name = name, type = fieldType }
+            self.encodeSet[name] = true
         end
     end
     table.sort(self.fieldNames)

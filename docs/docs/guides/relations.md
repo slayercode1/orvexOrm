@@ -296,6 +296,32 @@ print(player.profile.bio)
 print(#player.vehicles)
 ```
 
+### Eager loading sur plusieurs resultats
+
+`findAll` (et son raccourci `all`) accepte aussi `include`. Le chargement est **batche** : une seule requete `WHERE fk IN (...)` par relation, quel que soit le nombre de resultats. C'est ce qui evite le fameux probleme **N+1** (1 requete par joueur).
+
+```lua
+local cops = User.findAll({ job = "police" }, {
+    include = { "profile", "vehicles" }
+})
+
+for _, cop in ipairs(cops) do
+    print(cop.profile.bio)   -- deja charge, aucune requete
+    print(#cop.vehicles)     -- deja charge, aucune requete
+end
+```
+
+**SQL genere (3 requetes au total, peu importe le nombre de policiers) :**
+```sql
+SELECT * FROM users WHERE job = ?
+SELECT * FROM profiles WHERE user_id IN (?, ?, ?)
+SELECT * FROM vehicles WHERE owner_id IN (?, ?, ?)
+```
+
+:::info belongsToMany
+Le chargement batche fonctionne pour `hasOne`, `hasMany` et `belongsTo`. Les relations `belongsToMany` retombent sur un chargement par instance (une requete par resultat).
+:::
+
 ---
 
 ## whereHas — Filtrer par relation
@@ -328,7 +354,7 @@ SELECT * FROM users WHERE EXISTS (
 
 ## countByRelation — Compter les relations
 
-Compte combien d'enregistrements lies chaque parent possede.
+Compte combien d'enregistrements lies chaque parent possede. Les comptes sont recuperes en **une seule** requete `GROUP BY` (au lieu d'un `COUNT` par parent).
 
 ```lua
 local results = User.countByRelation("vehicles")
@@ -389,6 +415,7 @@ Vehicle.create({ owner_id = "license:abc", plate = "XYZ789", model = "adder" })
 | Fonctionnalite avancee | Methode | Description |
 |---|---|---|
 | Eager Loading | `Model.find(where, { include = {...} })` | Charge les relations automatiquement |
+| Eager Loading (liste) | `Model.findAll(where, { include = {...} })` | Chargement batche, 1 requete par relation |
 | Filtrer par relation | `Model.whereHas("relation")` | WHERE EXISTS |
 | Compter les relations | `Model.countByRelation("relation")` | Compte les liens |
 | Ecriture imbriquee | `Model.createWith(data)` | Cree parent + enfants |

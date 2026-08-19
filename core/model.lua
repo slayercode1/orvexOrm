@@ -69,19 +69,7 @@ function Instance:update(data)
         data.updated_at = os.date("!%Y-%m-%d %H:%M:%S")
     end
 
-    local encoded = data
-    local decodeFields = self._schema.decodeFields
-    if decodeFields and #decodeFields > 0 then
-        encoded = {}
-        for k, v in pairs(data) do
-            local ft = self._schema.fields[k]
-            if (ft == "json" or ft == "auto") and v ~= nil and type(v) == "table" then
-                encoded[k] = json.encode(v)
-            else
-                encoded[k] = v
-            end
-        end
-    end
+    local encoded = Serializer.encodeRow(data, self._schema.encodeSet)
 
     self:_exec(Query.update(self._tableName, encoded, self._where))
 
@@ -125,6 +113,7 @@ function Instance:restore()
     local whereKeys = Helpers.sortedKeys(self._where)
     local whereParts, params = {}, {}
     for i, k in ipairs(whereKeys) do
+        Helpers.assertSafeIdentifier(k)
         whereParts[i] = k .. " = ?"
         params[#params + 1] = self._where[k]
     end
@@ -205,6 +194,63 @@ function Instance:detach(name, relatedInstance)
     local result = Relations.detach(self, rel, relatedInstance)
     self._cache:invalidateTable(rel.pivot)
     return result
+end
+
+-- ─── Serialization / state ─────────────────────────────────────────
+
+local PRIVATE_FIELDS = {
+    _tableName = true, _schema = true, _adapter = true, _cache = true,
+    _where = true, _relations = true, _hooks = true,
+    _softDelete = true, _timestamps = true,
+}
+
+--- Returns a plain table copy without internal fields or metatable.
+--- Safe to json.encode or send through TriggerClientEvent.
+--- Eager-loaded relations are converted recursively.
+---@return table<string, any>
+function Instance:toTable()
+    local out = {}
+    for k, v in pairs(self) do
+        if not PRIVATE_FIELDS[k] then
+            if type(v) == "table" and getmetatable(v) == Instance then
+                out[k] = v:toTable()
+            elseif type(v) == "table" and getmetatable(v) == nil and type(v[1]) == "table" and getmetatable(v[1]) == Instance then
+                local list = {}
+                for i, item in ipairs(v) do
+                    list[i] = item:toTable()
+                end
+                out[k] = list
+            else
+                out[k] = v
+            end
+        end
+    end
+    return out
+end
+
+--- Reloads this instance's columns from the database.
+---@return boolean found
+function Instance:refresh()
+    local q = Query.select(self._tableName, self._where, "*")
+    Logger.query(q.sql, q.params)
+    local rows = self._adapter:execute(q.sql, q.params)
+    local row = rows and rows[1]
+    if not row then return false end
+
+    local decodeFields = self._schema.decodeFields
+    if decodeFields then
+        for i = 1, #decodeFields do
+            local df = decodeFields[i]
+            if row[df.name] ~= nil then
+                row[df.name] = Serializer.decode(row[df.name], df.type)
+            end
+        end
+    end
+
+    for k, v in pairs(row) do
+        self[k] = v
+    end
+    return true
 end
 
 -- ─── Private helpers ───────────────────────────────────────────────
@@ -467,37 +513,11 @@ function Model.new(tableName, fields, adapter, opts, cache)
 
     -- ─── CRUD methods ──────────────────────────────────────────────
 
-    -- Pre-compute set of fields that need encoding (json/auto only)
-    local encodeNeeded = {}
-    for name, fieldType in pairs(schema.fields) do
-        if fieldType == "json" or fieldType == "auto" then
-            encodeNeeded[name] = fieldType
-        end
-    end
-    local hasEncodeFields = next(encodeNeeded) ~= nil
-
     --- Modifies a COPY only when needed, otherwise returns data as-is.
     ---@param data table
     ---@return table
     local function fastEncode(data)
-        if not hasEncodeFields then return data end
-        local needsCopy = false
-        for name in pairs(encodeNeeded) do
-            if data[name] ~= nil and type(data[name]) == "table" then
-                needsCopy = true
-                break
-            end
-        end
-        if not needsCopy then return data end
-        local encoded = {}
-        for k, v in pairs(data) do
-            if encodeNeeded[k] and type(v) == "table" then
-                encoded[k] = json.encode(v)
-            else
-                encoded[k] = v
-            end
-        end
-        return encoded
+        return Serializer.encodeRow(data, schema.encodeSet)
     end
 
     ---@param data table<string, any>
@@ -603,7 +623,10 @@ function Model.new(tableName, fields, adapter, opts, cache)
             return nil
         end
 
-        local instance = wrapRow(rows[1], tableName, schema, adapter, primaryKey, relations, cache, hooks, softDelete, timestamps)
+        -- Wrap a copy when caching: wrapRow decodes JSON and attaches a
+        -- metatable in place, which would corrupt the cached row.
+        local row = cache:isEnabled() and Helpers.shallowCopy(rows[1]) or rows[1]
+        local instance = wrapRow(row, tableName, schema, adapter, primaryKey, relations, cache, hooks, softDelete, timestamps)
         if findOpts.include then
             M._eagerLoad(instance, findOpts.include)
         end
@@ -611,11 +634,12 @@ function Model.new(tableName, fields, adapter, opts, cache)
     end
 
     ---@param where table<string, any>
-    ---@param findOpts? { select?: string[] }
+    ---@param findOpts? { select?: string[], include?: string[] }
     ---@return OrvexInstance[]
     function M.findAll(where, findOpts)
         findOpts = findOpts or {}
         local columns = buildColumns(findOpts.select, primaryKey)
+        local results
 
         -- Use builder when operator values are present or soft delete is active
         local hasOperators = false
@@ -629,33 +653,42 @@ function Model.new(tableName, fields, adapter, opts, cache)
             for k, v in pairs(where) do
                 b:where({ [k] = v })
             end
-            return b:get()
-        end
+            results = b:get()
+        else
+            local q = Query.select(tableName, where, columns)
 
-        local q = Query.select(tableName, where, columns)
+            local cacheKey = CacheLib.makeKey(q.sql, q.params)
+            local cached, hit = cache:get(cacheKey)
+            if hit then
+                results = {}
+                for i, row in ipairs(cached or {}) do
+                    results[i] = wrapRow(Helpers.shallowCopy(row), tableName, schema, adapter, primaryKey, relations, cache, hooks, softDelete, timestamps)
+                end
+            else
+                Logger.query(q.sql, q.params)
+                local rows = adapter:execute(q.sql, q.params) or {}
+                cache:set(cacheKey, rows)
 
-        local cacheKey = CacheLib.makeKey(q.sql, q.params)
-        local cached, hit = cache:get(cacheKey)
-        if hit then
-            if not cached then return {} end
-            local results = {}
-            for i, row in ipairs(cached) do
-                results[i] = wrapRow(Helpers.shallowCopy(row), tableName, schema, adapter, primaryKey, relations, cache, hooks, softDelete, timestamps)
+                -- Wrap copies when caching (wrapRow mutates the row in place)
+                local copyRows = cache:isEnabled()
+                results = {}
+                for i, row in ipairs(rows) do
+                    if copyRows then row = Helpers.shallowCopy(row) end
+                    results[i] = wrapRow(row, tableName, schema, adapter, primaryKey, relations, cache, hooks, softDelete, timestamps)
+                end
             end
-            return results
         end
 
-        Logger.query(q.sql, q.params)
-        local rows = adapter:execute(q.sql, q.params)
-        cache:set(cacheKey, rows)
-
-        if not rows then return {} end
-
-        local results = {}
-        for i, row in ipairs(rows) do
-            results[i] = wrapRow(row, tableName, schema, adapter, primaryKey, relations, cache, hooks, softDelete, timestamps)
+        if findOpts.include and #results > 0 then
+            M._eagerLoadMany(results, findOpts.include)
         end
         return results
+    end
+
+    ---@param findOpts? { select?: string[], include?: string[] }
+    ---@return OrvexInstance[]
+    function M.all(findOpts)
+        return M.findAll({}, findOpts)
     end
 
     ---@param data table<string, any>
@@ -663,15 +696,22 @@ function Model.new(tableName, fields, adapter, opts, cache)
     function M.upsert(data)
         validateData(data)
 
+        local updateFields
         if timestamps then
             local now = os.date("!%Y-%m-%d %H:%M:%S")
             data.created_at = data.created_at or now
             data.updated_at = data.updated_at or now
+            -- On duplicate rows, keep the original created_at
+            updateFields = {}
+            for k in pairs(data) do
+                if k ~= "created_at" then updateFields[k] = true end
+            end
+            if next(updateFields) == nil then updateFields = nil end
         end
 
         local encoded = fastEncode(data)
 
-        execWrite(Query.upsert(tableName, encoded))
+        execWrite(Query.upsert(tableName, encoded, updateFields))
         return true
     end
 
@@ -722,10 +762,11 @@ function Model.new(tableName, fields, adapter, opts, cache)
         local whereParts = {}
         local params = {}
         for i, k in ipairs(whereKeys) do
+            Helpers.assertSafeIdentifier(k)
             whereParts[i] = k .. " = ?"
             params[#params + 1] = where[k]
         end
-        local sql = ("UPDATE %s SET deleted_at = NULL WHERE %s"):format(
+        local sql = ("UPDATE `%s` SET deleted_at = NULL WHERE %s"):format(
             tableName, table.concat(whereParts, " AND ")
         )
         execWriteRaw(sql, params)
@@ -794,7 +835,7 @@ function Model.new(tableName, fields, adapter, opts, cache)
         return classAdjust(column, amount, where, "decrement")
     end
 
-    -- ─── Eager loading helper ──────────────────────────────────────
+    -- ─── Eager loading helpers ─────────────────────────────────────
 
     ---@param instance OrvexInstance
     ---@param relationNames string[]
@@ -803,6 +844,80 @@ function Model.new(tableName, fields, adapter, opts, cache)
             local rel = relations[name]
             if rel then
                 instance[name] = instance:get(name)
+            end
+        end
+    end
+
+    ---@param instances OrvexInstance[]
+    ---@param localKey string
+    ---@return any[] keys
+    local function collectKeys(instances, localKey)
+        local keys, seen = {}, {}
+        for _, inst in ipairs(instances) do
+            local kv = inst[localKey]
+            if kv ~= nil and not seen[kv] then
+                seen[kv] = true
+                keys[#keys + 1] = kv
+            end
+        end
+        return keys
+    end
+
+    --- Batched eager loading: one query per relation instead of one per
+    --- instance (avoids N+1). belongsToMany falls back to per-instance loading.
+    ---@param instances OrvexInstance[]
+    ---@param relationNames string[]
+    function M._eagerLoadMany(instances, relationNames)
+        for _, name in ipairs(relationNames) do
+            local rel = relations[name]
+            if rel then
+                if rel.type == Relations.HAS_ONE or rel.type == Relations.HAS_MANY then
+                    local localKey = rel.localKey or primaryKey
+                    local keys = collectKeys(instances, localKey)
+                    local byKey = {}
+                    if #keys > 0 then
+                        local related = rel.model.query():whereIn(rel.foreignKey, keys):get()
+                        for _, r in ipairs(related) do
+                            local fk = r[rel.foreignKey]
+                            if rel.type == Relations.HAS_MANY then
+                                local bucket = byKey[fk]
+                                if not bucket then bucket = {}; byKey[fk] = bucket end
+                                bucket[#bucket + 1] = r
+                            elseif byKey[fk] == nil then
+                                byKey[fk] = r
+                            end
+                        end
+                    end
+                    for _, inst in ipairs(instances) do
+                        local kv = inst[localKey]
+                        local loaded = kv ~= nil and byKey[kv] or nil
+                        if rel.type == Relations.HAS_MANY then
+                            inst[name] = loaded or {}
+                        else
+                            inst[name] = loaded
+                        end
+                    end
+                elseif rel.type == Relations.BELONGS_TO then
+                    local ownerKey = rel.ownerKey or rel.model._primaryKey
+                    local keys = collectKeys(instances, rel.foreignKey)
+                    local byKey = {}
+                    if #keys > 0 then
+                        local related = rel.model.query():whereIn(ownerKey, keys):get()
+                        for _, r in ipairs(related) do
+                            if byKey[r[ownerKey]] == nil then
+                                byKey[r[ownerKey]] = r
+                            end
+                        end
+                    end
+                    for _, inst in ipairs(instances) do
+                        local kv = inst[rel.foreignKey]
+                        inst[name] = kv ~= nil and byKey[kv] or nil
+                    end
+                else
+                    for _, inst in ipairs(instances) do
+                        inst[name] = inst:get(name)
+                    end
+                end
             end
         end
     end
@@ -867,9 +982,11 @@ function Model.new(tableName, fields, adapter, opts, cache)
 
     -- ─── Count by relation ───────────────────────────────────────────
 
+    --- Uses a single GROUP BY query for all instances instead of one
+    --- COUNT query per instance (avoids N+1).
     ---@param relationName string
     ---@param where? table<string, any>
-    ---@return integer
+    ---@return { instance: OrvexInstance, count: integer }[]
     function M.countByRelation(relationName, where)
         local rel = relations[relationName]
         assert(rel, ("Unknown relation '%s'"):format(relationName))
@@ -882,23 +999,40 @@ function Model.new(tableName, fields, adapter, opts, cache)
         local results = b:get()
 
         local counts = {}
-        for _, inst in ipairs(results) do
-            local countSQL, countParams
-            if rel.type == Relations.HAS_ONE or rel.type == Relations.HAS_MANY then
-                countSQL = ("SELECT COUNT(*) as cnt FROM %s WHERE %s = ?"):format(
-                    rel.model._tableName, rel.foreignKey
-                )
-                countParams = { inst[localKey] }
-            elseif rel.type == Relations.BELONGS_TO_MANY then
-                countSQL = ("SELECT COUNT(*) as cnt FROM %s WHERE %s = ?"):format(
-                    rel.pivot, rel.foreignKey
-                )
-                countParams = { inst[localKey] }
-            end
+        if #results == 0 then return counts end
 
-            Logger.query(countSQL, countParams)
-            local rows = adapter:execute(countSQL, countParams)
-            local cnt = (rows and rows[1]) and rows[1].cnt or 0
+        local countTable = rel.type == Relations.BELONGS_TO_MANY and rel.pivot or rel.model._tableName
+        local keys = {}
+        do
+            local seen = {}
+            for _, inst in ipairs(results) do
+                local kv = inst[localKey]
+                if kv ~= nil and not seen[kv] then
+                    seen[kv] = true
+                    keys[#keys + 1] = kv
+                end
+            end
+        end
+
+        local byKey = {}
+        if #keys > 0 then
+            local countSQL = ("SELECT %s AS fk, COUNT(*) AS cnt FROM %s WHERE %s IN (%s) GROUP BY %s"):format(
+                rel.foreignKey, countTable, rel.foreignKey, Helpers.placeholders(#keys), rel.foreignKey
+            )
+            Logger.query(countSQL, keys)
+            local rows = adapter:execute(countSQL, keys)
+            if rows then
+                for _, row in ipairs(rows) do
+                    if row.fk ~= nil then
+                        byKey[row.fk] = tonumber(row.cnt) or 0
+                    end
+                end
+            end
+        end
+
+        for _, inst in ipairs(results) do
+            local kv = inst[localKey]
+            local cnt = (kv ~= nil and byKey[kv]) or 0
             inst["_count_" .. relationName] = cnt
             counts[#counts + 1] = { instance = inst, count = cnt }
         end

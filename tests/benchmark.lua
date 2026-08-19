@@ -45,10 +45,15 @@ promise = {
     end,
 }
 Citizen = { Await = function(p) return p._value end }
+local function _mock_query(query, params, cb)
+    cb(_noop_result)
+end
+
 MySQL = {
-    prepare = function(query, params, cb)
-        cb(_noop_result)
-    end,
+    prepare = _mock_query,
+    query = _mock_query,
+    insert = _mock_query,
+    update = _mock_query,
     transaction = function(queries, cb)
         cb(true)
     end,

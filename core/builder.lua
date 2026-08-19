@@ -132,6 +132,7 @@ end
 function Builder:where(field, operator, value)
     if type(field) == "string" and operator ~= nil and value ~= nil then
         assertId(field)
+        operator = operator:upper()
         assertOp(operator)
         self._wheres[#self._wheres + 1] = {
             clause = field .. " " .. operator .. " ?",
@@ -167,6 +168,7 @@ end
 function Builder:orWhere(field, operator, value)
     if type(field) == "string" and operator ~= nil and value ~= nil then
         assertId(field)
+        operator = operator:upper()
         assertOp(operator)
         self._wheres[#self._wheres + 1] = {
             clause = field .. " " .. operator .. " ?",
@@ -194,6 +196,20 @@ function Builder:orWhere(field, operator, value)
         return self
     end
 
+    error("Invalid orWhere() arguments")
+end
+
+--- Escape hatch for conditions the builder cannot express.
+--- The clause is inserted verbatim: NEVER interpolate user input into it,
+--- always pass values through `params`.
+---@param clause string
+---@param params? any[]
+---@return OrvexBuilder
+function Builder:whereRaw(clause, params)
+    self._wheres[#self._wheres + 1] = {
+        clause = "(" .. clause .. ")",
+        params = params or {},
+    }
     return self
 end
 
@@ -528,30 +544,39 @@ end
 
 ---@private
 function Builder:_cachedExecute(sql, params)
-    if self._cache then
+    if self._cache and self._cache:isEnabled() then
         local cacheKey = CacheLib.makeKey(sql, params)
         local cached, hit = self._cache:get(cacheKey)
         if hit then
-            return cached or {}
+            return cached or {}, true
         end
 
         local rows = self._adapter:execute(sql, params)
         self._cache:set(cacheKey, rows)
-        return rows or {}
+        return rows or {}, true
     end
 
-    return self._adapter:execute(sql, params) or {}
+    return self._adapter:execute(sql, params) or {}, false
 end
 
 ---@return OrvexInstance[]
 function Builder:get()
     local sql, params = self:_buildSQL()
-    local rows = self:_cachedExecute(sql, params)
+    local rows, shared = self:_cachedExecute(sql, params)
 
     if self._wrapFn then
         local results = {}
-        for i, row in ipairs(rows) do
-            results[i] = self._wrapFn(row)
+        -- When rows live in the cache, wrap copies: wrapping decodes JSON
+        -- fields and attaches a metatable in place, which would corrupt
+        -- the cached entry for subsequent hits.
+        if shared then
+            for i, row in ipairs(rows) do
+                results[i] = self._wrapFn(Helpers.shallowCopy(row))
+            end
+        else
+            for i, row in ipairs(rows) do
+                results[i] = self._wrapFn(row)
+            end
         end
         return results
     end
@@ -641,8 +666,10 @@ end
 
 ---@return boolean
 function Builder:exists()
+    local oldLimit = self._limit
+    self._limit = 1
     local sql, params = self:_buildSQL("1")
-    sql = sql .. " LIMIT 1"
+    self._limit = oldLimit
     local rows = self:_cachedExecute(sql, params)
     return #rows > 0
 end

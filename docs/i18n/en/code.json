@@ -465,5 +465,11 @@
   },
   "homepage.layout.description": {
     "message": "OrvexORM — a lightweight ORM for FiveM built on oxmysql"
+  },
+  "homepage.eyebrow": {
+    "message": "Open source · FiveM · Lua 5.4"
+  },
+  "homepage.headline": {
+    "message": "The ORM that makes SQL disappear."
   }
 }

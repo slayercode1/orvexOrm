@@ -86,6 +86,23 @@ OrvexORM.flushCache()
 OrvexORM.disableCache()
 ```
 
+### Consulter les statistiques
+
+`OrvexORM.cacheStats()` te dit si ton cache est efficace :
+
+```lua
+local stats = OrvexORM.cacheStats()
+
+print(stats.hits)     -- lectures servies depuis le cache
+print(stats.misses)   -- lectures qui ont interroge la base
+print(stats.hitRate)  -- ratio hits / (hits + misses)
+print(stats.entries)  -- nombre d'entrees actuellement en cache
+```
+
+:::tip Interpreter le hitRate
+Un `hitRate` proche de 1 signifie que la plupart des lectures viennent du cache. S'il est tres bas, ton TTL est peut-etre trop court, ou tes requetes sont trop variees pour beneficier du cache.
+:::
+
 ## Quel TTL choisir ?
 
 | Situation | TTL recommande |

@@ -168,3 +168,47 @@ Restaure une ligne supprimee en douceur. Necessite `softDelete = true`.
 player:restore()
 print(player.deleted_at)  -- nil
 ```
+
+---
+
+### `instance:toTable()` → `table`
+
+Retourne une copie "plate" de l'instance : une simple table Lua sans les champs internes (`_tableName`, `_adapter`, etc.) ni metatable. Les relations chargees en eager loading sont converties recursivement.
+
+Cas d'usage principal : envoyer les donnees au client via `TriggerClientEvent` ou les serialiser avec `json.encode`.
+
+```lua
+local player = User.find({ identifier = "license:abc" }, {
+    include = { "vehicles" }
+})
+
+-- Envoyer au client (une instance ne passe pas telle quelle)
+TriggerClientEvent("myresource:playerData", src, player:toTable())
+
+-- Ou serialiser en JSON
+local jsonStr = json.encode(player:toTable())
+```
+
+:::tip Pourquoi toTable ?
+Une instance contient des champs internes et une metatable qui ne survivent pas au passage reseau ni a `json.encode`. `toTable()` te donne une table propre, prete a etre envoyee.
+:::
+
+---
+
+### `instance:refresh()` → `boolean`
+
+Recharge les colonnes de l'instance depuis la base de donnees. Retourne `false` si la ligne n'existe plus, `true` sinon. Les champs JSON sont re-decodes.
+
+```lua
+local player = User.find({ identifier = "license:abc" })
+
+-- Quelqu'un d'autre modifie la ligne...
+User.update({ money = 9999 }, { identifier = "license:abc" })
+
+-- Recharger les donnees fraiches
+if player:refresh() then
+    print(player.money)  -- 9999
+else
+    print("La ligne n'existe plus")
+end
+```

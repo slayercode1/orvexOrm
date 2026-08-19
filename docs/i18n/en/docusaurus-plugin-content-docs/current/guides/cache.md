@@ -86,6 +86,23 @@ OrvexORM.flushCache()
 OrvexORM.disableCache()
 ```
 
+## Monitoring the cache
+
+`OrvexORM.cacheStats()` returns global cache statistics, useful for checking that the cache is actually helping:
+
+```lua
+local stats = OrvexORM.cacheStats()
+
+print(stats.hits)     -- number of cache hits
+print(stats.misses)   -- number of cache misses
+print(stats.hitRate)  -- hit ratio (hits / (hits + misses))
+print(stats.entries)  -- number of entries currently cached
+```
+
+:::tip
+A low `hitRate` means most queries never hit the cache — try increasing the TTL, or check that you're not caching data that changes on every query.
+:::
+
 ## Choosing the right TTL
 
 | Situation | Recommended TTL |

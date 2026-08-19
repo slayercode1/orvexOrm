@@ -2,6 +2,20 @@
 -- MySQL driver for FiveM -- compatible with oxmysql and mysql-async.
 -- Uses oxmysql SYNC exports when available, falls back to global MySQL API.
 
+---@param query string
+---@return string|nil verb
+local function sqlVerb(query)
+    local verb = query:match("^%s*(%a+)")
+    return verb and verb:upper() or nil
+end
+
+---@param query string
+---@return boolean
+local function isReadQuery(query)
+    local verb = sqlVerb(query)
+    return verb == "SELECT" or verb == "DESCRIBE" or verb == "SHOW" or verb == "EXPLAIN"
+end
+
 ---@class OrvexAutoDriver : OrvexDriver
 local AutoDriver = {}
 AutoDriver.__index = AutoDriver
@@ -34,25 +48,29 @@ function AutoDriver:_detect()
     error("No MySQL library found. Ensure oxmysql or mysql-async is started before orvexorm.")
 end
 
+---@param fn function
+---@param query string
+---@param params any[]
+---@return any
+local function awaitCallback(fn, query, params)
+    local p = promise.new()
+    fn(query, params, function(result) p:resolve(result) end)
+    return Citizen.Await(p)
+end
+
 function AutoDriver:execute(query, params)
     self:_detect()
     if self._mode == "oxmysql_export" then
         local result = exports.oxmysql:executeSync(query, params)
         return type(result) == "table" and result or {}
     elseif self._mode == "oxmysql_global" then
-        local p = promise.new()
-        MySQL.prepare(query, params, function(result)
-            if type(result) == "table" then
-                p:resolve(result)
-            else
-                p:resolve({})
-            end
-        end)
-        return Citizen.Await(p)
+        -- MySQL.query always returns an array of rows for SELECT,
+        -- unlike MySQL.prepare which flattens single-row/single-column results.
+        local result = awaitCallback(MySQL.query, query, params)
+        return type(result) == "table" and result or {}
     else
         local p = promise.new()
-        local upper = query:upper():match("^%s*(%a+)")
-        if upper == "SELECT" or upper == "DESCRIBE" or upper == "SHOW" then
+        if isReadQuery(query) then
             MySQL.Async.fetchAll(query, params, function(r) p:resolve(r or {}) end)
         else
             MySQL.Async.execute(query, params, function(r)
@@ -65,24 +83,30 @@ end
 
 function AutoDriver:scalar(query, params)
     self:_detect()
+    local verb = sqlVerb(query)
     if self._mode == "oxmysql_export" then
-        local upper = query:upper():match("^%s*(%a+)")
-        if upper == "INSERT" then
+        if verb == "INSERT" then
             return exports.oxmysql:insertSync(query, params)
-        elseif upper == "SELECT" or upper == "DESCRIBE" or upper == "SHOW" then
+        elseif isReadQuery(query) then
             return exports.oxmysql:executeSync(query, params)
         else
             return exports.oxmysql:updateSync(query, params)
         end
     elseif self._mode == "oxmysql_global" then
-        local p = promise.new()
-        MySQL.prepare(query, params, function(result)
-            p:resolve(result)
-        end)
-        return Citizen.Await(p)
+        if verb == "INSERT" then
+            return awaitCallback(MySQL.insert, query, params)
+        elseif verb == "UPDATE" or verb == "DELETE" then
+            return awaitCallback(MySQL.update, query, params)
+        else
+            return awaitCallback(MySQL.query, query, params)
+        end
     else
         local p = promise.new()
-        MySQL.Async.execute(query, params, function(r) p:resolve(r) end)
+        if verb == "INSERT" then
+            MySQL.Async.insert(query, params, function(r) p:resolve(r) end)
+        else
+            MySQL.Async.execute(query, params, function(r) p:resolve(r) end)
+        end
         return Citizen.Await(p)
     end
 end

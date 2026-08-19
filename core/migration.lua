@@ -2,6 +2,7 @@
 -- Migration system for creating and managing database tables.
 
 local Helpers = OrvexHelpers or require("utils.helpers")
+local assertId = Helpers.assertSafeIdentifier
 
 ---@alias OrvexColumnDef { type: string, length?: number, nullable?: boolean, default?: any, primary?: boolean, unique?: boolean, autoIncrement?: boolean, unsigned?: boolean, references?: { table: string, column: string } }
 
@@ -44,6 +45,7 @@ local TYPE_MAP = {
 ---@param isPrimaryKey? boolean
 ---@return string sql
 local function columnToSQL(name, def, isPrimaryKey)
+    assertId(name)
     local colType, nullable, default, unique, autoIncrement, unsigned
 
     if type(def) == "string" then
@@ -121,6 +123,7 @@ end
 ---@param tableName string
 ---@param callback fun(table: OrvexTableBuilder)
 function SchemaBuilder:create(tableName, callback)
+    assertId(tableName)
     local tb = TableBuilder.new()
     callback(tb)
     self._creates[#self._creates + 1] = {
@@ -135,17 +138,20 @@ end
 
 ---@param tableName string
 function SchemaBuilder:drop(tableName)
+    assertId(tableName)
     self._drops[#self._drops + 1] = tableName
 end
 
 ---@param tableName string
 function SchemaBuilder:dropIfExists(tableName)
+    assertId(tableName)
     self._rawStatements[#self._rawStatements + 1] = ("DROP TABLE IF EXISTS `%s`"):format(tableName)
 end
 
 ---@param tableName string
 ---@param callback fun(table: OrvexTableBuilder)
 function SchemaBuilder:table(tableName, callback)
+    assertId(tableName)
     self._tableName = tableName
     local tb = TableBuilder.new()
     callback(tb)
@@ -267,6 +273,8 @@ end
 ---@param length? number
 ---@return OrvexTableBuilder
 function TableBuilder:string(name, length)
+    assertId(name)
+    assert(not length or (type(length) == "number" and length >= 1 and length <= 65535 and length % 1 == 0), "VARCHAR length must be an integer between 1 and 65535")
     local colType = length and ("VARCHAR(%d)"):format(length) or "VARCHAR(255)"
     self._columns[#self._columns + 1] = {
         name = name,
@@ -278,6 +286,7 @@ end
 ---@param name string
 ---@return OrvexTableBuilder
 function TableBuilder:integer(name)
+    assertId(name)
     self._columns[#self._columns + 1] = {
         name = name,
         sql  = ("`%s` INT NULL DEFAULT NULL"):format(name),
@@ -288,6 +297,7 @@ end
 ---@param name string
 ---@return OrvexTableBuilder
 function TableBuilder:bigInteger(name)
+    assertId(name)
     self._columns[#self._columns + 1] = {
         name = name,
         sql  = ("`%s` BIGINT NULL DEFAULT NULL"):format(name),
@@ -298,6 +308,7 @@ end
 ---@param name string
 ---@return OrvexTableBuilder
 function TableBuilder:boolean(name)
+    assertId(name)
     self._columns[#self._columns + 1] = {
         name = name,
         sql  = ("`%s` TINYINT(1) NULL DEFAULT 0"):format(name),
@@ -308,6 +319,7 @@ end
 ---@param name string
 ---@return OrvexTableBuilder
 function TableBuilder:text(name)
+    assertId(name)
     self._columns[#self._columns + 1] = {
         name = name,
         sql  = ("`%s` TEXT NULL"):format(name),
@@ -318,6 +330,7 @@ end
 ---@param name string
 ---@return OrvexTableBuilder
 function TableBuilder:json(name)
+    assertId(name)
     self._columns[#self._columns + 1] = {
         name = name,
         sql  = ("`%s` JSON NULL"):format(name),
@@ -328,6 +341,7 @@ end
 ---@param name string
 ---@return OrvexTableBuilder
 function TableBuilder:float(name)
+    assertId(name)
     self._columns[#self._columns + 1] = {
         name = name,
         sql  = ("`%s` FLOAT NULL DEFAULT NULL"):format(name),
@@ -338,6 +352,7 @@ end
 ---@param name string
 ---@return OrvexTableBuilder
 function TableBuilder:double(name)
+    assertId(name)
     self._columns[#self._columns + 1] = {
         name = name,
         sql  = ("`%s` DOUBLE NULL DEFAULT NULL"):format(name),
@@ -348,6 +363,7 @@ end
 ---@param name string
 ---@return OrvexTableBuilder
 function TableBuilder:date(name)
+    assertId(name)
     self._columns[#self._columns + 1] = {
         name = name,
         sql  = ("`%s` DATE NULL DEFAULT NULL"):format(name),
@@ -358,6 +374,7 @@ end
 ---@param name string
 ---@return OrvexTableBuilder
 function TableBuilder:datetime(name)
+    assertId(name)
     self._columns[#self._columns + 1] = {
         name = name,
         sql  = ("`%s` DATETIME NULL DEFAULT NULL"):format(name),
@@ -368,6 +385,7 @@ end
 ---@param name string
 ---@return OrvexTableBuilder
 function TableBuilder:timestamp(name)
+    assertId(name)
     self._columns[#self._columns + 1] = {
         name = name,
         sql  = ("`%s` TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP"):format(name),
@@ -379,6 +397,7 @@ end
 ---@return OrvexTableBuilder
 function TableBuilder:id(name)
     name = name or "id"
+    assertId(name)
     self._columns[#self._columns + 1] = {
         name    = name,
         primary = true,
@@ -392,6 +411,8 @@ end
 ---@return OrvexTableBuilder
 function TableBuilder:primaryString(name, length)
     length = length or 60
+    assertId(name)
+    assert(type(length) == "number" and length >= 1 and length <= 65535 and length % 1 == 0, "VARCHAR length must be an integer between 1 and 65535")
     self._columns[#self._columns + 1] = {
         name    = name,
         primary = true,
@@ -404,6 +425,8 @@ end
 ---@param values string[]
 ---@return OrvexTableBuilder
 function TableBuilder:enum(name, values)
+    assertId(name)
+    assert(type(values) == "table" and #values > 0, "enum requires at least one value")
     local quoted = {}
     for _, v in ipairs(values) do
         quoted[#quoted + 1] = "'" .. v:gsub("'", "''") .. "'"
@@ -443,6 +466,8 @@ end
 function TableBuilder:unique(columns, indexName)
     if type(columns) == "string" then columns = { columns } end
     indexName = indexName or ("uq_" .. table.concat(columns, "_"))
+    assertId(indexName)
+    for _, column in ipairs(columns) do assertId(column) end
     self._indexes[#self._indexes + 1] = {
         name = indexName,
         columns = columns,
@@ -457,6 +482,8 @@ end
 function TableBuilder:index(columns, indexName)
     if type(columns) == "string" then columns = { columns } end
     indexName = indexName or ("idx_" .. table.concat(columns, "_"))
+    assertId(indexName)
+    for _, column in ipairs(columns) do assertId(column) end
     self._indexes[#self._indexes + 1] = {
         name = indexName,
         columns = columns,
@@ -472,6 +499,9 @@ end
 ---@return OrvexTableBuilder
 function TableBuilder:foreignKey(column, refTable, refColumn, opts)
     opts = opts or {}
+    assertId(column)
+    assertId(refTable)
+    assertId(refColumn)
     local VALID_ACTIONS = { CASCADE = true, RESTRICT = true, ["SET NULL"] = true, ["NO ACTION"] = true, ["SET DEFAULT"] = true }
     local onDelete = (opts.onDelete or "CASCADE"):upper()
     local onUpdate = (opts.onUpdate or "CASCADE"):upper()
@@ -490,6 +520,7 @@ end
 ---@param name string
 ---@return OrvexTableBuilder
 function TableBuilder:dropColumn(name)
+    assertId(name)
     self._dropColumns[#self._dropColumns + 1] = name
     return self
 end
@@ -498,6 +529,8 @@ end
 ---@param to string
 ---@return OrvexTableBuilder
 function TableBuilder:renameColumn(from, to)
+    assertId(from)
+    assertId(to)
     self._renames[#self._renames + 1] = { from = from, to = to }
     return self
 end
@@ -514,6 +547,8 @@ Migration.TRACKING_TABLE = "orvex_migrations"
 ---@param primaryKey string
 ---@return string sql
 function Migration.generateCreateSQL(tableName, fields, primaryKey)
+    assertId(tableName)
+    assertId(primaryKey)
     local keys = Helpers.sortedKeys(fields)
     local colParts = {}
 
@@ -561,7 +596,7 @@ end
 function Migration.getCurrentBatch(adapter)
     local rows = adapter:execute("SELECT MAX(batch) as batch FROM orvex_migrations", {})
     if rows and rows[1] and rows[1].batch then
-        return rows[1].batch
+        return tonumber(rows[1].batch) or 0
     end
     return 0
 end

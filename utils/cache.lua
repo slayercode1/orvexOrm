@@ -19,7 +19,14 @@ function Cache.new(opts)
     self._store   = {}
     self._ttl     = opts.ttl or 60
     self._enabled = opts.enabled ~= false
+    self._hits    = 0
+    self._misses  = 0
     return self
+end
+
+---@return boolean
+function Cache:isEnabled()
+    return self._enabled
 end
 
 --- Optimized: builds string directly for common cases.
@@ -55,14 +62,17 @@ function Cache:get(key)
 
     local entry = self._store[key]
     if not entry then
+        self._misses = self._misses + 1
         return nil, false
     end
 
     if os.time() >= entry.expires then
         self._store[key] = nil
+        self._misses = self._misses + 1
         return nil, false
     end
 
+    self._hits = self._hits + 1
     return entry.value, true
 end
 
@@ -120,6 +130,17 @@ function Cache:setEnabled(enabled)
     if not enabled then
         self:flush()
     end
+end
+
+---@return { hits: integer, misses: integer, hitRate: number, entries: integer }
+function Cache:stats()
+    local total = self._hits + self._misses
+    return {
+        hits    = self._hits,
+        misses  = self._misses,
+        hitRate = total > 0 and (self._hits / total) or 0,
+        entries = self:size(),
+    }
 end
 
 ---@return integer

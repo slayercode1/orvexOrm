@@ -28,6 +28,34 @@ function Serializer.encode(value, fieldType)
     return value
 end
 
+--- Encodes json/auto table values of a row. Copies the row only when at
+--- least one field actually needs encoding, otherwise returns it as-is.
+---@param data table<string, any>
+---@param encodeSet table<string, boolean>
+---@return table<string, any>
+function Serializer.encodeRow(data, encodeSet)
+    if next(encodeSet) == nil then return data end
+
+    local needsCopy = false
+    for name in pairs(encodeSet) do
+        if type(data[name]) == "table" then
+            needsCopy = true
+            break
+        end
+    end
+    if not needsCopy then return data end
+
+    local encoded = {}
+    for k, v in pairs(data) do
+        if encodeSet[k] and type(v) == "table" then
+            encoded[k] = json.encode(v)
+        else
+            encoded[k] = v
+        end
+    end
+    return encoded
+end
+
 --- Note: oxmysql may return DATE/DATETIME/TIMESTAMP columns as Unix timestamp
 --- numbers instead of formatted strings.
 ---@param value any

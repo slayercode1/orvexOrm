@@ -8,7 +8,7 @@ OrvexORM Studio est une **interface web** qui te permet de visualiser et gerer t
 
 ## Lancement
 
-Aucune installation requise. Le studio est 100% Lua, integre directement dans la ressource orvexorm.
+Aucune installation requise. Le studio est 100% Lua, integre directement dans la ressource orvexorm. Il fonctionne avec **oxmysql** et **mysql-async** : les requetes sont routees via l'adaptateur de l'ORM, quelle que soit la librairie installee.
 
 ### Depuis la console txAdmin
 
@@ -19,10 +19,9 @@ orvexstudio
 ```
 
 Le studio :
-1. Lit automatiquement le `mysql_connection_string` de ton `server.cfg`
-2. Genere un **token secret** de securite
-3. Lance le serveur web
-4. Affiche l'URL securisee dans la console
+1. Genere un **token secret** avec la source aleatoire du systeme, ou utilise le convar `orvex_studio_token` s'il contient au moins 32 caracteres
+2. Active les routes web integrees a la ressource
+3. Affiche l'URL d'acces dans la console
 
 ```
 ══════════════════════════════════════════════════
@@ -53,14 +52,17 @@ Le port `30120` est le port HTTP de FiveM (le meme que ton serveur).
 
 ## Securite
 
-Le studio est protege par un **token aleatoire** genere a chaque lancement. Seules les personnes qui voient la console txAdmin ont acces a l'URL.
+Le studio est protege par un **token aleatoire** genere a chaque lancement. Si la source aleatoire du systeme n'est pas disponible, le demarrage echoue au lieu de creer un token previsible. Tu peux fournir un token stable avec `set orvex_studio_token "..."` ; il doit contenir au moins 32 caracteres.
 
-- Le token est dans l'URL : `http://localhost:30120/orvexorm/?token=...`
-- Apres la premiere connexion, un cookie est place (valide 24h)
+- Le token initial est dans l'URL, puis il est retire de la barre d'adresse et envoye dans l'en-tete `X-Studio-Token`
+- Aucun cookie d'authentification n'est cree
+- Le token expire apres **30 minutes** ; relance `orvexstudio` pour obtenir une nouvelle session
 - Sans le token, toute requete retourne `403 Access Denied`
+- **Protection anti-bruteforce** : une IP est verrouillee pendant **5 minutes** apres **5 tokens invalides**
+- Les requetes sont limitees a **120 par minute et par adresse** et les corps a **1 Mio**
 
 :::caution
-OrvexORM Studio est un **outil de developpement**. Ne l'expose jamais sur un serveur accessible publiquement. Il donne un acces complet a ta base de donnees.
+OrvexORM Studio est un **outil de developpement**. L'endpoint est expose sur le port public `30120` (le port HTTP de FiveM) : tant que le studio tourne, n'importe qui connaissant le token a un acces complet a ta base de donnees. Le token est regenere a chaque demarrage, mais prends l'habitude d'arreter le studio (`orvexstudio stop`) des que tu as fini.
 :::
 
 ## Fonctionnalites
@@ -78,7 +80,7 @@ Le panneau gauche affiche toutes les tables de ta base de donnees avec le nombre
 ### Modifier les donnees
 
 - **Ajouter une ligne** : clique sur "Add Row", remplis le formulaire, et valide
-- **Modifier une ligne** : clique sur une ligne pour ouvrir l'editeur
+- **Modifier une ligne** : utilise le bouton d'edition de la ligne pour ouvrir l'editeur
 - **Supprimer une ligne** : clique sur le bouton de suppression (avec confirmation)
 
 Les champs du formulaire s'adaptent automatiquement au type de la colonne :

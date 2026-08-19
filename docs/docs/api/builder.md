@@ -307,6 +307,24 @@ Filtre avec `WHERE EXISTS` (sous-requete).
 
 ---
 
+### `:whereRaw(clause, params?)`
+
+Ajoute une clause SQL libre, entouree de parentheses et combinee en AND avec les autres conditions.
+
+```lua
+:whereRaw("money > ? OR job = ?", { 1000, "police" })
+-- SQL: WHERE (money > ? OR job = ?)
+
+:whereRaw("LOWER(name) = ?", { "john" })
+-- SQL: WHERE (LOWER(name) = ?)
+```
+
+:::caution Injection SQL
+Passe **toujours** les valeurs via `params`, jamais par concatenation de chaine. `:whereRaw("name = '" .. input .. "'")` est une porte ouverte a l'injection SQL.
+:::
+
+---
+
 ### `:after(column, value, direction?)`
 
 Pagination par curseur : recupere les lignes apres une valeur donnee.

@@ -1,228 +1,252 @@
+/* ═══ Home — Barely There ══════════════════════════════════════════ */
+
+/* ─── Hero ──────────────────────────────────────────────────────── */
+
 .heroBanner {
-  padding: 5rem 0 4rem;
-  text-align: center;
-  position: relative;
+  padding: 6.5rem 0 5.5rem;
+  background: var(--orvex-bg);
   overflow: hidden;
 }
 
-@media screen and (max-width: 996px) {
-  .heroBanner {
-    padding: 3rem 1.5rem 2.5rem;
-  }
+.heroInner {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+  gap: 4rem;
+  align-items: center;
+}
+
+.heroEyebrow {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ifm-color-primary);
+  margin-bottom: 1.25rem;
+}
+
+.heroTitle {
+  font-size: clamp(2.4rem, 5vw, 3.4rem);
+  font-weight: 750;
+  letter-spacing: -0.045em;
+  line-height: 1.06;
+  color: var(--orvex-text);
+  margin-bottom: 1.25rem;
+}
+
+.heroSubtitle {
+  font-size: 1.08rem;
+  line-height: 1.75;
+  color: var(--orvex-subtle-text);
+  max-width: 26rem;
+  margin-bottom: 2.25rem;
 }
 
 .buttons {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 0.75rem;
-  margin-top: 2.5rem;
-}
-
-.heroButton {
-  padding: 0.7rem 1.75rem;
-  font-weight: 600;
-  font-size: 0.9rem;
-  border-radius: 8px;
-  transition: all 0.15s ease;
-  text-decoration: none;
+  gap: 1.25rem;
+  flex-wrap: wrap;
 }
 
 .heroButtonPrimary {
-  composes: heroButton;
-  background: #10b981;
-  color: #0a0a0b !important;
-  border: none;
+  padding: 0.68rem 1.5rem;
+  font-weight: 600;
+  font-size: 0.9rem;
+  border-radius: 10px;
+  background: var(--orvex-accent-solid);
+  color: #08130e !important;
+  text-decoration: none !important;
+  transition: transform 120ms cubic-bezier(0.2, 0, 0, 1),
+              box-shadow 120ms cubic-bezier(0.2, 0, 0, 1),
+              filter 120ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 .heroButtonPrimary:hover {
-  background: #34d399;
-  color: #0a0a0b !important;
-  text-decoration: none;
+  filter: brightness(1.06);
+  transform: translateY(-1px);
+  box-shadow: 0 8px 24px -8px rgba(16, 185, 129, 0.45);
 }
 
 .heroButtonSecondary {
-  composes: heroButton;
-  background: transparent;
-  border: 1px solid #27272a;
-  color: #a1a1aa !important;
+  font-weight: 550;
+  font-size: 0.9rem;
+  color: var(--orvex-subtle-text) !important;
+  text-decoration: none !important;
+  transition: color 120ms cubic-bezier(0.2, 0, 0, 1);
 }
 
-[data-theme='light'] .heroButtonSecondary {
-  border-color: #e5e7eb;
-  color: #6b7280 !important;
+.heroButtonSecondary::after {
+  content: "→";
+  display: inline-block;
+  margin-left: 0.4rem;
+  transition: transform 120ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 .heroButtonSecondary:hover {
-  border-color: #10b981;
-  color: #10b981 !important;
-  text-decoration: none;
+  color: var(--orvex-text) !important;
 }
 
-/* ─── Badge ───────────────────────────────────────────────────── */
-
-.badge {
-  display: inline-block;
-  padding: 0.25rem 0.85rem;
-  border-radius: 20px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  background: rgba(16, 185, 129, 0.1);
-  color: #34d399;
-  border: 1px solid rgba(16, 185, 129, 0.2);
-  margin-bottom: 1.5rem;
+.heroButtonSecondary:hover::after {
+  transform: translateX(3px);
 }
 
-[data-theme='light'] .badge {
-  background: rgba(16, 185, 129, 0.08);
-  color: #0d9668;
-  border-color: rgba(16, 185, 129, 0.2);
+.heroCode {
+  min-width: 0;
+  border-radius: 14px;
+  box-shadow: var(--orvex-shadow-float);
 }
 
-/* ─── Features ────────────────────────────────────────────────── */
+.heroCode :global(.theme-code-block) {
+  margin: 0;
+  box-shadow: none;
+}
 
-.features {
-  padding: 4rem 0;
-  border-top: 1px solid var(--orvex-card-border);
+@media screen and (max-width: 996px) {
+  .heroBanner {
+    padding: 3.5rem 0 3rem;
+  }
+  .heroInner {
+    grid-template-columns: 1fr;
+    gap: 2.5rem;
+  }
+  .heroSubtitle {
+    max-width: none;
+  }
+}
+
+/* ─── Sections ──────────────────────────────────────────────────── */
+
+.features,
+.codeShowcase,
+.quickStart {
+  padding: 5.5rem 0;
+  border-top: 1px solid var(--orvex-hairline);
 }
 
 .sectionTitle {
-  text-align: center;
-  font-size: 1.75rem;
-  font-weight: 800;
+  font-size: 1.6rem;
+  font-weight: 700;
   letter-spacing: -0.03em;
-  margin-bottom: 0.25rem;
+  margin-bottom: 0.4rem;
 }
 
 .sectionSubtitle {
-  text-align: center;
   color: var(--orvex-subtle-text);
-  font-size: 1rem;
-  margin-bottom: 2.5rem;
+  font-size: 0.98rem;
+  margin-bottom: 3rem;
+  max-width: 34rem;
 }
 
+/* ─── Feature cards ─────────────────────────────────────────────── */
+
 .featureCard {
-  background: var(--orvex-card-bg);
-  border: 1px solid var(--orvex-card-border);
-  border-radius: 10px;
-  padding: 1.5rem;
+  background: var(--orvex-surface);
+  border: none;
+  border-radius: 14px;
+  padding: 1.6rem 1.7rem;
   height: 100%;
-  transition: border-color 0.15s ease;
+  transition: transform 150ms cubic-bezier(0.2, 0, 0, 1),
+              box-shadow 150ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 .featureCard:hover {
-  border-color: rgba(16, 185, 129, 0.3);
+  transform: translateY(-2px);
+  box-shadow: var(--orvex-shadow-card);
 }
 
 .featureTitle {
   font-size: 0.95rem;
-  font-weight: 700;
-  margin-bottom: 0.35rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin-bottom: 0.4rem;
 }
 
 .featureDesc {
   color: var(--orvex-subtle-text);
-  font-size: 0.85rem;
-  line-height: 1.6;
+  font-size: 0.86rem;
+  line-height: 1.65;
   margin: 0;
 }
 
-/* ─── Code showcase ───────────────────────────────────────────── */
+/* ─── Code showcase ─────────────────────────────────────────────── */
 
-.codeShowcase {
-  padding: 4rem 0;
-  border-top: 1px solid var(--orvex-card-border);
+.codeTag {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 650;
+  letter-spacing: 0.12em;
+  color: var(--ifm-color-primary);
+  margin-bottom: 0.7rem;
 }
 
 .codeShowcaseTitle {
-  font-size: 1.3rem;
-  font-weight: 700;
+  font-size: 1.25rem;
+  font-weight: 650;
   letter-spacing: -0.02em;
-  margin-bottom: 0.35rem;
+  margin-bottom: 0.4rem;
 }
 
 .codeShowcaseSubtitle {
   color: var(--orvex-subtle-text);
   font-size: 0.9rem;
   margin-bottom: 1.5rem;
-  line-height: 1.6;
+  line-height: 1.65;
 }
 
-.codeTag {
-  display: inline-block;
-  padding: 0.15rem 0.5rem;
-  border-radius: 4px;
-  font-size: 0.65rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  background: rgba(16, 185, 129, 0.1);
-  color: var(--ifm-color-primary);
-  margin-bottom: 0.75rem;
-}
-
-/* ─── Quick start ─────────────────────────────────────────────── */
-
-.quickStart {
-  padding: 4rem 0;
-  border-top: 1px solid var(--orvex-card-border);
-}
-
-.quickStartTitle {
-  composes: sectionTitle;
-}
-
-.quickStartSubtitle {
-  composes: sectionSubtitle;
-}
+/* ─── Quick start paths ─────────────────────────────────────────── */
 
 .pathCard {
   display: flex;
   flex-direction: column;
-  background: var(--orvex-card-bg);
-  border: 1px solid var(--orvex-card-border);
-  border-radius: 10px;
-  padding: 1.5rem;
+  background: var(--orvex-surface);
+  border: none;
+  border-radius: 14px;
+  padding: 1.6rem 1.7rem;
   height: 100%;
   text-decoration: none !important;
   color: inherit !important;
-  transition: border-color 0.15s ease;
+  transition: transform 150ms cubic-bezier(0.2, 0, 0, 1),
+              box-shadow 150ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 .pathCard:hover {
-  border-color: var(--ifm-color-primary);
+  transform: translateY(-2px);
+  box-shadow: var(--orvex-shadow-card);
+}
+
+.pathCard:hover .pathArrow {
+  transform: translateX(3px);
 }
 
 .pathNumber {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 6px;
-  font-size: 0.8rem;
-  font-weight: 700;
-  background: rgba(16, 185, 129, 0.1);
+  font-size: 0.72rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
   color: var(--ifm-color-primary);
-  margin-bottom: 0.75rem;
+  margin-bottom: 0.9rem;
 }
 
 .pathTitle {
-  font-size: 1rem;
-  font-weight: 700;
+  font-size: 0.98rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
   margin-bottom: 0.35rem;
 }
 
 .pathDesc {
   color: var(--orvex-subtle-text);
   font-size: 0.85rem;
-  line-height: 1.5;
+  line-height: 1.6;
   flex-grow: 1;
+  margin-bottom: 0;
 }
 
 .pathArrow {
   color: var(--ifm-color-primary);
   font-weight: 600;
-  font-size: 0.8rem;
-  margin-top: 0.75rem;
+  font-size: 0.85rem;
+  margin-top: 0.9rem;
+  display: inline-block;
+  transition: transform 150ms cubic-bezier(0.2, 0, 0, 1);
 }
