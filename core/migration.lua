@@ -12,13 +12,7 @@ local assertId = Helpers.assertSafeIdentifier
 ---@field down fun(schema: OrvexSchemaBuilder)
 
 ---@class OrvexSchemaBuilder
----@field private _tableName string
----@field private _columns OrvexColumnSQL[]
----@field private _drops string[]
----@field private _addColumns OrvexColumnSQL[]
----@field private _dropColumns string[]
----@field private _renames { from: string, to: string }[]
----@field private _rawStatements string[]
+---@field private _statements string[] SQL statements, in call order
 local SchemaBuilder = {}
 SchemaBuilder.__index = SchemaBuilder
 
@@ -27,6 +21,7 @@ local TableBuilder
 ---@class OrvexColumnSQL
 ---@field name string
 ---@field sql string
+---@field primary? boolean
 
 ---@type table<string, string>
 local TYPE_MAP = {
@@ -88,7 +83,7 @@ local function columnToSQL(name, def, isPrimaryKey)
 
     if default ~= nil then
         if type(default) == "string" then
-            parts[#parts + 1] = ("DEFAULT '%s'"):format(default:gsub("'", "''"))
+            parts[#parts + 1] = "DEFAULT " .. Helpers.quoteLiteral(default)
         elseif type(default) == "boolean" then
             parts[#parts + 1] = ("DEFAULT %s"):format(default and "1" or "0")
         else
@@ -105,72 +100,32 @@ local function columnToSQL(name, def, isPrimaryKey)
     return table.concat(parts, " ")
 end
 
--- ─── SchemaBuilder methods ──────────────────────────────────────────
+-- ─── SQL fragments shared by CREATE TABLE and ALTER TABLE ───────────
 
-function SchemaBuilder.new()
-    return setmetatable({
-        _tableName     = nil,
-        _columns       = {},
-        _drops         = {},
-        _addColumns    = {},
-        _dropColumns   = {},
-        _renames       = {},
-        _rawStatements = {},
-        _creates       = {},
-    }, SchemaBuilder)
+---@param columns string[]
+---@return string
+local function quoteColumnList(columns)
+    local quoted = {}
+    for _, c in ipairs(columns) do quoted[#quoted + 1] = "`" .. c .. "`" end
+    return table.concat(quoted, ", ")
 end
 
 ---@param tableName string
----@param callback fun(table: OrvexTableBuilder)
-function SchemaBuilder:create(tableName, callback)
-    assertId(tableName)
-    local tb = TableBuilder.new()
-    callback(tb)
-    self._creates[#self._creates + 1] = {
-        tableName    = tableName,
-        columns      = tb._columns,
-        tableBuilder = tb,
-    }
-    self._tableName = tableName
-    self._columns = tb._columns
-    self._tableBuilder = tb
+---@param fk table
+---@return string
+local function foreignKeyClause(tableName, fk)
+    return ("CONSTRAINT `%s` FOREIGN KEY (`%s`) REFERENCES `%s` (`%s`) ON DELETE %s ON UPDATE %s"):format(
+        ("fk_%s_%s"):format(tableName, fk.column), fk.column, fk.refTable, fk.refColumn, fk.onDelete, fk.onUpdate
+    )
 end
 
 ---@param tableName string
-function SchemaBuilder:drop(tableName)
-    assertId(tableName)
-    self._drops[#self._drops + 1] = tableName
-end
-
----@param tableName string
-function SchemaBuilder:dropIfExists(tableName)
-    assertId(tableName)
-    self._rawStatements[#self._rawStatements + 1] = ("DROP TABLE IF EXISTS `%s`"):format(tableName)
-end
-
----@param tableName string
----@param callback fun(table: OrvexTableBuilder)
-function SchemaBuilder:table(tableName, callback)
-    assertId(tableName)
-    self._tableName = tableName
-    local tb = TableBuilder.new()
-    callback(tb)
-    self._addColumns = tb._columns
-    self._dropColumns = tb._dropColumns or {}
-    self._renames = tb._renames or {}
-end
-
----@param sql string
-function SchemaBuilder:raw(sql)
-    self._rawStatements[#self._rawStatements + 1] = sql
-end
-
----@param createOp table
+---@param tb OrvexTableBuilder
 ---@return string sql
-local function buildCreateTableSQL(createOp)
+local function buildCreateTableSQL(tableName, tb)
     local colParts = {}
     local pkName = nil
-    for _, col in ipairs(createOp.columns) do
+    for _, col in ipairs(tb._columns) do
         colParts[#colParts + 1] = "  " .. col.sql
         if col.primary then
             pkName = col.name
@@ -179,73 +134,104 @@ local function buildCreateTableSQL(createOp)
     if pkName then
         colParts[#colParts + 1] = ("  PRIMARY KEY (`%s`)"):format(pkName)
     end
-    local tb = createOp.tableBuilder
-    if tb then
-        for _, idx in ipairs(tb._indexes) do
-            local cols = {}
-            for _, c in ipairs(idx.columns) do cols[#cols + 1] = "`" .. c .. "`" end
-            local colStr = table.concat(cols, ", ")
-            if idx.unique then
-                colParts[#colParts + 1] = ("  UNIQUE KEY `%s` (%s)"):format(idx.name, colStr)
-            else
-                colParts[#colParts + 1] = ("  KEY `%s` (%s)"):format(idx.name, colStr)
-            end
-        end
-        for _, fk in ipairs(tb._foreignKeys) do
-            local fkName = ("fk_%s_%s"):format(createOp.tableName, fk.column)
-            colParts[#colParts + 1] = ("  CONSTRAINT `%s` FOREIGN KEY (`%s`) REFERENCES `%s` (`%s`) ON DELETE %s ON UPDATE %s"):format(
-                fkName, fk.column, fk.refTable, fk.refColumn, fk.onDelete, fk.onUpdate
-            )
-        end
+    for _, idx in ipairs(tb._indexes) do
+        local keyword = idx.unique and "UNIQUE KEY" or "KEY"
+        colParts[#colParts + 1] = ("  %s `%s` (%s)"):format(keyword, idx.name, quoteColumnList(idx.columns))
+    end
+    for _, fk in ipairs(tb._foreignKeys) do
+        colParts[#colParts + 1] = "  " .. foreignKeyClause(tableName, fk)
     end
     return ("CREATE TABLE IF NOT EXISTS `%s` (\n%s\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"):format(
-        createOp.tableName, table.concat(colParts, ",\n")
+        tableName, table.concat(colParts, ",\n")
     )
+end
+
+--- ALTER TABLE statements for one table() call. Columns are added, dropped
+--- and renamed first so that indexes and foreign keys can target them.
+---@param tableName string
+---@param tb OrvexTableBuilder
+---@return string[] statements
+local function buildAlterTableSQL(tableName, tb)
+    local alter = ("ALTER TABLE `%s` "):format(tableName)
+    local statements = {}
+    local function add(clause) statements[#statements + 1] = alter .. clause end
+
+    for _, col in ipairs(tb._columns) do
+        add("ADD COLUMN " .. col.sql .. (col.primary and " PRIMARY KEY" or ""))
+    end
+    for _, colName in ipairs(tb._dropColumns) do
+        add(("DROP COLUMN `%s`"):format(colName))
+    end
+    for _, r in ipairs(tb._renames) do
+        add(("RENAME COLUMN `%s` TO `%s`"):format(r.from, r.to))
+    end
+    for _, idx in ipairs(tb._indexes) do
+        local keyword = idx.unique and "ADD UNIQUE INDEX" or "ADD INDEX"
+        add(("%s `%s` (%s)"):format(keyword, idx.name, quoteColumnList(idx.columns)))
+    end
+    for _, fk in ipairs(tb._foreignKeys) do
+        add("ADD " .. foreignKeyClause(tableName, fk))
+    end
+    return statements
+end
+
+-- ─── SchemaBuilder methods ──────────────────────────────────────────
+-- Every operation appends its SQL to `_statements` when it is called,
+-- so toSQL() returns the statements in call order.
+
+function SchemaBuilder.new()
+    return setmetatable({ _statements = {} }, SchemaBuilder)
+end
+
+---@param sql string
+function SchemaBuilder:_push(sql)
+    self._statements[#self._statements + 1] = sql
+end
+
+---@param callback fun(table: OrvexTableBuilder)
+---@return OrvexTableBuilder
+local function buildTable(callback)
+    local tb = TableBuilder.new()
+    callback(tb)
+    return tb
+end
+
+---@param tableName string
+---@param callback fun(table: OrvexTableBuilder)
+function SchemaBuilder:create(tableName, callback)
+    assertId(tableName)
+    self:_push(buildCreateTableSQL(tableName, buildTable(callback)))
+end
+
+---@param tableName string
+function SchemaBuilder:drop(tableName)
+    assertId(tableName)
+    self:_push(("DROP TABLE `%s`"):format(tableName))
+end
+
+---@param tableName string
+function SchemaBuilder:dropIfExists(tableName)
+    assertId(tableName)
+    self:_push(("DROP TABLE IF EXISTS `%s`"):format(tableName))
+end
+
+---@param tableName string
+---@param callback fun(table: OrvexTableBuilder)
+function SchemaBuilder:table(tableName, callback)
+    assertId(tableName)
+    for _, sql in ipairs(buildAlterTableSQL(tableName, buildTable(callback))) do
+        self:_push(sql)
+    end
+end
+
+---@param sql string
+function SchemaBuilder:raw(sql)
+    self:_push(sql)
 end
 
 ---@return string[]
 function SchemaBuilder:toSQL()
-    local statements = {}
-
-    if #self._creates > 0 then
-        for _, createOp in ipairs(self._creates) do
-            statements[#statements + 1] = buildCreateTableSQL(createOp)
-        end
-    end
-
-    if self._tableName and #self._addColumns > 0 and #self._creates == 0 then
-        for _, col in ipairs(self._addColumns) do
-            statements[#statements + 1] = ("ALTER TABLE `%s` ADD COLUMN %s"):format(
-                self._tableName, col.sql
-            )
-        end
-    end
-
-    if self._tableName and self._dropColumns then
-        for _, colName in ipairs(self._dropColumns) do
-            statements[#statements + 1] = ("ALTER TABLE `%s` DROP COLUMN `%s`"):format(
-                self._tableName, colName
-            )
-        end
-    end
-
-    if self._tableName and self._renames then
-        for _, r in ipairs(self._renames) do
-            statements[#statements + 1] = ("ALTER TABLE `%s` RENAME COLUMN `%s` TO `%s`"):format(
-                self._tableName, r.from, r.to
-            )
-        end
-    end
-
-    for _, tableName in ipairs(self._drops) do
-        statements[#statements + 1] = ("DROP TABLE `%s`"):format(tableName)
-    end
-
-    for _, sql in ipairs(self._rawStatements) do
-        statements[#statements + 1] = sql
-    end
-
-    return statements
+    return table.move(self._statements, 1, #self._statements, 1, {})
 end
 
 -- ─── TableBuilder ───────────────────────────────────────────────────
@@ -429,7 +415,7 @@ function TableBuilder:enum(name, values)
     assert(type(values) == "table" and #values > 0, "enum requires at least one value")
     local quoted = {}
     for _, v in ipairs(values) do
-        quoted[#quoted + 1] = "'" .. v:gsub("'", "''") .. "'"
+        quoted[#quoted + 1] = Helpers.quoteLiteral(v)
     end
     self._columns[#self._columns + 1] = {
         name = name,
@@ -542,6 +528,16 @@ local Migration = {}
 
 Migration.TRACKING_TABLE = "orvex_migrations"
 
+--- Same column as TableBuilder:id(), used when a model does not declare its primary key.
+---@param primaryKey string
+---@return string sql
+local function autoIncrementPrimaryKeySQL(primaryKey)
+    return ("`%s` INT UNSIGNED NOT NULL AUTO_INCREMENT"):format(primaryKey)
+end
+
+--- Builds the CREATE TABLE used by Model.sync(). When `primaryKey` is not
+--- declared in `fields`, an `INT UNSIGNED NOT NULL AUTO_INCREMENT` column is
+--- injected first, like TableBuilder:id().
 ---@param tableName string
 ---@param fields table<string, OrvexFieldType|OrvexColumnDef>
 ---@param primaryKey string
@@ -551,6 +547,10 @@ function Migration.generateCreateSQL(tableName, fields, primaryKey)
     assertId(primaryKey)
     local keys = Helpers.sortedKeys(fields)
     local colParts = {}
+
+    if fields[primaryKey] == nil then
+        colParts[1] = "  " .. autoIncrementPrimaryKeySQL(primaryKey)
+    end
 
     for _, name in ipairs(keys) do
         local isPK = (name == primaryKey)
@@ -601,9 +601,40 @@ function Migration.getCurrentBatch(adapter)
     return 0
 end
 
+--- Runs one schema step (`up` or `down`) and every statement it produces.
+--- A driver that swallows a query error returns nil (oxmysql), so a nil
+--- result is treated as a failure too.
+---@param step fun(schema: OrvexSchemaBuilder)
+---@param adapter OrvexAdapter
+local function runSchemaStep(step, adapter)
+    local sb = SchemaBuilder.new()
+    step(sb)
+    for _, sql in ipairs(sb:toSQL()) do
+        if adapter:scalar(sql, {}) == nil then
+            error(("statement failed (driver returned no result): %s"):format(sql), 0)
+        end
+    end
+end
+
+--- Raises the error of a failed migration step. MySQL DDL is not
+--- transactional: statements that ran before the failure stay applied.
+---@param action string "Migration" or "Rollback"
+---@param doneVerb string past tense of the action, e.g. "applied"
+---@param mig OrvexMigration
+---@param doneCount number
+---@param err any
+local function raiseStepFailure(action, doneVerb, mig, doneCount, err)
+    error(("[OrvexORM] %s of migration '%s' failed (%d migration(s) %s before it): %s"):format(
+        action, mig.name, doneCount, doneVerb, tostring(err)
+    ), 0)
+end
+
+--- Applies pending migrations in order. Each migration runs under pcall:
+--- on the first failure it is NOT recorded, the following ones are not run,
+--- and an error naming it is raised.
 ---@param migrations OrvexMigration[]
 ---@param adapter OrvexAdapter
----@return number count
+---@return number count applied migrations
 function Migration.migrate(migrations, adapter)
     Migration.ensureTrackingTable(adapter)
     local applied = Migration.getApplied(adapter)
@@ -612,12 +643,8 @@ function Migration.migrate(migrations, adapter)
 
     for _, mig in ipairs(migrations) do
         if not applied[mig.name] then
-            local sb = SchemaBuilder.new()
-            mig.up(sb)
-            local statements = sb:toSQL()
-            for _, sql in ipairs(statements) do
-                adapter:scalar(sql, {})
-            end
+            local ok, err = pcall(runSchemaStep, mig.up, adapter)
+            if not ok then raiseStepFailure("Migration", "applied", mig, count, err) end
             adapter:scalar(
                 "INSERT INTO orvex_migrations (name, batch) VALUES (?, ?)",
                 { mig.name, batch }
@@ -629,9 +656,11 @@ function Migration.migrate(migrations, adapter)
     return count
 end
 
+--- Rolls back the last batch, newest first. A failed `down` keeps its
+--- migration recorded and raises, like migrate().
 ---@param migrations OrvexMigration[]
 ---@param adapter OrvexAdapter
----@return number count
+---@return number count rolled back migrations
 function Migration.rollback(migrations, adapter)
     Migration.ensureTrackingTable(adapter)
     local batch = Migration.getCurrentBatch(adapter)
@@ -652,12 +681,8 @@ function Migration.rollback(migrations, adapter)
     for _, row in ipairs(rows) do
         local mig = migByName[row.name]
         if mig then
-            local sb = SchemaBuilder.new()
-            mig.down(sb)
-            local statements = sb:toSQL()
-            for _, sql in ipairs(statements) do
-                adapter:scalar(sql, {})
-            end
+            local ok, err = pcall(runSchemaStep, mig.down, adapter)
+            if not ok then raiseStepFailure("Rollback", "rolled back", mig, count, err) end
         end
         adapter:scalar("DELETE FROM orvex_migrations WHERE name = ?", { row.name })
         count = count + 1
