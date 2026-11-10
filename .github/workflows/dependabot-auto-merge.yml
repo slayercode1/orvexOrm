@@ -1,0 +1,91 @@
+name: Dependabot auto-merge
+
+# Le mainteneur pousse directement sur main et ne suit pas les PR : celles de
+# Dependabot se mergent seules si les tests Lua, luacheck et la doc passent.
+# Une PR qui echoue reste ouverte (et l'alerte Discord la signale si le secret
+# DISCORD_ALERT_WEBHOOK existe).
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependabot-auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  lua:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    uses: ./.github/workflows/test.yml
+
+  docs:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    uses: ./.github/workflows/docs-check.yml
+
+  # Seul job en ecriture : il n'execute aucun code de la PR, ni checkout ni
+  # action tierce.
+  merge:
+    needs: [lua, docs]
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PR_URL: ${{ github.event.pull_request.html_url }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      # Un conflit n'est pas un echec : Dependabot rebase seul une PR en conflit
+      # (bun.lock apres un autre merge), ce qui relance ce workflow. Les nouvelles
+      # tentatives couvrent l'etat UNKNOWN et deux merges simultanes sur main.
+      - name: Merge the pull request
+        id: merge
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            case "$(gh pr view "$PR_URL" --json mergeable --jq .mergeable)" in
+              CONFLICTING)
+                echo "En conflit : le rebase de Dependabot relancera ce workflow."
+                exit 0
+                ;;
+              MERGEABLE)
+                if gh pr merge "$PR_URL" --merge --match-head-commit "$HEAD_SHA"; then
+                  echo "merged=true" >> "$GITHUB_OUTPUT"
+                  exit 0
+                fi
+                ;;
+            esac
+            sleep 10
+          done
+          echo "Merge impossible apres $attempt tentatives." >&2
+          exit 1
+
+      # Un merge fait avec GITHUB_TOKEN ne declenche pas `push` ;
+      # workflow_dispatch est l'exception, et deploy-docs.yml garde ses controles.
+      - name: Redeploy the docs
+        if: steps.merge.outputs.merged == 'true'
+        run: gh workflow run deploy-docs.yml --ref main
+
+  # Sans checkout : le webhook ne cotoie aucun code de la PR. Le secret doit
+  # aussi exister dans les secrets Dependabot, seuls visibles depuis ces runs.
+  alert:
+    needs: [lua, docs, merge]
+    if: ${{ !cancelled() && github.event.pull_request.user.login == 'dependabot[bot]' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post to Discord
+        env:
+          DISCORD_ALERT_WEBHOOK: ${{ secrets.DISCORD_ALERT_WEBHOOK }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          [ -n "$DISCORD_ALERT_WEBHOOK" ] || exit 0
+          jq -n --arg content "⚠️ Auto-merge Dependabot bloque : $PR_TITLE"$'\n'"$PR_URL" \
+            '{ content: $content, allowed_mentions: { parse: [] } }' \
+            | curl --fail --silent --show-error --max-time 15 \
+              --header "Content-Type: application/json" --data @- "$DISCORD_ALERT_WEBHOOK"

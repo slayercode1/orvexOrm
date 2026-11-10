@@ -1,3 +1,7 @@
+# Mainteneur seul : une PR groupee par ecosysteme et par semaine pour les mises a
+# jour mineures/patch ; les majeures restent separees pour qu'une qui casse ne
+# bloque pas les autres. Toutes les PR se mergent seules si les controles passent
+# (dependabot-auto-merge.yml).
 version: 2
 
 updates:
@@ -5,12 +9,35 @@ updates:
     directory: /docs
     schedule:
       interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Paris
+    # Une version publiee depuis moins de 3 jours n'est pas proposee : la plupart
+    # des paquets compromis sont retires du registre avant.
+    cooldown:
+      default-days: 3
+    open-pull-requests-limit: 5
     groups:
       docusaurus:
         patterns:
           - "@docusaurus/*"
+      bun-minor-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: deps
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Paris
+    cooldown:
+      default-days: 3
+    open-pull-requests-limit: 3
+    groups:
+      actions-minor-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: ci

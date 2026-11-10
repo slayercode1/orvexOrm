@@ -12,6 +12,7 @@ on:
       - 'docs/**'
       - 'fxmanifest.lua'
       - '.github/workflows/docs-check.yml'
+  workflow_call:
 
 permissions:
   contents: read
