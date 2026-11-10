@@ -511,6 +511,38 @@ table.grid { width: 100%; border-collapse: collapse; }
     </main>
 </div>
 
+<template id="mainAreaTemplate">
+        <div class="page-head">
+            <div class="page-head-row">
+                <div>
+                    <div class="page-title"></div>
+                    <div class="tabs" role="tablist">
+                        <button class="tab active" id="tabData" role="tab" aria-selected="true" data-action="show-tab" data-tab="data">Data</button>
+                        <button class="tab" id="tabSchema" role="tab" aria-selected="false" data-action="show-tab" data-tab="schema">Schema</button>
+                    </div>
+                </div>
+                <div class="spacer"></div>
+                <button class="btn btn-primary" data-action="add-row">
+                    <span class="icon"><svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></span>
+                    Add row
+                </button>
+            </div>
+        </div>
+        <div class="tabs-rule"></div>
+        <div class="filter-bar" id="filterBar">
+            <select id="filterCol" aria-label="Filter column"><option value="">Filter by…</option></select>
+            <select id="filterOp" aria-label="Filter operator"><option value="=">=</option><option value="!=">&ne;</option><option value=">">&gt;</option><option value="<">&lt;</option><option value=">=">&ge;</option><option value="<=">&le;</option><option value="LIKE">contains</option><option value="IS NULL">is null</option><option value="IS NOT NULL">is not null</option></select>
+            <input type="text" id="filterVal" class="filter-value" placeholder="Value…" aria-label="Filter value">
+            <button class="btn btn-ghost" data-action="apply-filter">Apply</button>
+            <span class="f-active" id="filterActive">
+                <span>filtered</span>
+                <button class="btn btn-ghost btn-compact" data-action="clear-filter">Clear</button>
+            </span>
+        </div>
+        <div class="grid-wrapper" id="gridWrapper"></div>
+        <div class="pagination" id="pagination"></div>
+</template>
+
 <script nonce="{{NONCE}}">
 (() => {
 'use strict';
@@ -567,13 +599,6 @@ async function api(p, o = {}, attempt = 0) {
 
 /* ─── DOM helpers ───────────────────────────────────────────────── */
 
-const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-
-// Safe in text and in quoted attribute contexts.
-function esc(s) {
-    return String(s).replace(/[&<>"']/g, ch => HTML_ESCAPES[ch]);
-}
-
 // Builds an element without parsing HTML: values land in properties
 // (value, checked, dataset…) so row data can never become markup.
 function h(tag, props = {}, ...children) {
@@ -588,11 +613,12 @@ function h(tag, props = {}, ...children) {
     return node;
 }
 
-// For trusted, static SVG icons only.
-function icon(markup, className = 'icon') {
-    const wrapper = h('span', { className });
-    wrapper.innerHTML = markup;
-    return wrapper;
+// Parses one trusted, static SVG from ICONS. Never pass data here:
+// database values only ever reach the page through h() and textContent.
+function svg(markup) {
+    const template = document.createElement('template');
+    template.innerHTML = markup;
+    return template.content.firstElementChild;
 }
 
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
@@ -601,7 +627,18 @@ const ICONS = {
     success: '<svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>',
     error: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>',
     close: '<svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
+    emptyTable: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/></svg>',
+    edit: '<svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg>',
+    trash: '<svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
+    previous: '<svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>',
+    next: '<svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>',
 };
+
+function emptyState(title, hint, iconMarkup) {
+    return h('div', { className: 'empty' }, iconMarkup ? svg(iconMarkup) : null,
+        h('span', { className: 'e-title' }, title),
+        h('span', { className: 'e-hint' }, hint));
+}
 
 /* ─── Toast ─────────────────────────────────────────────────────── */
 
@@ -609,9 +646,7 @@ const visibleToasts = new Map();
 
 function toast(msg, type = 'success', dedupeKey = `${type}:${msg}`) {
     if (visibleToasts.has(dedupeKey)) return;
-    const el = h('div', { className: 'toast ' + type, role: 'status' });
-    el.innerHTML = ICONS[type] || ICONS.error;
-    el.append(String(msg));
+    const el = h('div', { className: 'toast ' + type, role: 'status' }, svg(ICONS[type] || ICONS.error), String(msg));
     document.body.appendChild(el);
     visibleToasts.set(dedupeKey, el);
     const duration = type === 'error' ? 6000 : 2800;
@@ -683,36 +718,9 @@ async function selectTable(name) {
 }
 
 function renderMainArea() {
-    document.getElementById('mainArea').innerHTML = `
-        <div class="page-head">
-            <div class="page-head-row">
-                <div>
-                    <div class="page-title">${esc(currentTable)}</div>
-                    <div class="tabs" role="tablist">
-                        <button class="tab active" id="tabData" role="tab" aria-selected="true" data-action="show-tab" data-tab="data">Data</button>
-                        <button class="tab" id="tabSchema" role="tab" aria-selected="false" data-action="show-tab" data-tab="schema">Schema</button>
-                    </div>
-                </div>
-                <div class="spacer"></div>
-                <button class="btn btn-primary" data-action="add-row">
-                    <span class="icon"><svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></span>
-                    Add row
-                </button>
-            </div>
-        </div>
-        <div class="tabs-rule"></div>
-        <div class="filter-bar" id="filterBar">
-            <select id="filterCol" aria-label="Filter column"><option value="">Filter by…</option></select>
-            <select id="filterOp" aria-label="Filter operator"><option value="=">=</option><option value="!=">&ne;</option><option value=">">&gt;</option><option value="<">&lt;</option><option value=">=">&ge;</option><option value="<=">&le;</option><option value="LIKE">contains</option><option value="IS NULL">is null</option><option value="IS NOT NULL">is not null</option></select>
-            <input type="text" id="filterVal" class="filter-value" placeholder="Value…" aria-label="Filter value">
-            <button class="btn btn-ghost" data-action="apply-filter">Apply</button>
-            <span class="f-active" id="filterActive">
-                <span>filtered</span>
-                <button class="btn btn-ghost btn-compact" data-action="clear-filter">Clear</button>
-            </span>
-        </div>
-        <div class="grid-wrapper" id="gridWrapper"></div>
-        <div class="pagination" id="pagination"></div>`;
+    const main = document.getElementById('mainArea');
+    main.replaceChildren(document.getElementById('mainAreaTemplate').content.cloneNode(true));
+    main.querySelector('.page-title').textContent = String(currentTable);
     const sel = document.getElementById('filterCol');
     currentSchema.forEach(c => sel.appendChild(h('option', { value: c.Field }, String(c.Field))));
     renderSkeleton();
@@ -745,8 +753,33 @@ async function loadRows() {
         const d = await api('/api/tables/' + encodeURIComponent(currentTable) + '/rows?' + p.toString());
         renderGrid(d.rows || [], d.total || 0);
     } catch (error) {
-        document.getElementById('gridWrapper').innerHTML = '<div class="empty"><span class="e-title">Unable to load rows</span><span class="e-hint">Check the connection, then try again.</span></div>';
+        document.getElementById('gridWrapper').replaceChildren(emptyState('Unable to load rows', 'Check the connection, then try again.'));
     }
+}
+
+function gridHeader(cols) {
+    return h('thead', {}, h('tr', {},
+        cols.map((c, index) => {
+            const sorted = currentSort === c;
+            const indicator = sorted ? (currentDir === 'asc' ? '▲' : '▼') : '';
+            const ariaSort = sorted ? (currentDir === 'asc' ? 'ascending' : 'descending') : 'none';
+            return h('th', { className: sorted ? 'sorted' : '', 'aria-sort': ariaSort },
+                h('button', { dataset: { action: 'sort', colIndex: index } }, String(c),
+                    h('span', { className: 'sort-ind' }, indicator)));
+        }),
+        h('th', { className: 'actions-head', 'aria-hidden': 'true' })));
+}
+
+function gridCell(value) {
+    if (value === null || value === undefined) return h('td', {}, h('span', { className: 'null-val' }, 'null'));
+    if (typeof value === 'object') return h('td', {}, h('span', { className: 'json-val' }, JSON.stringify(value)));
+    return h('td', {}, String(value));
+}
+
+function rowActions(rowIndex) {
+    return h('td', { className: 'row-actions' },
+        h('button', { className: 'action-btn', 'aria-label': 'Edit row', dataset: { action: 'edit-row', rowIndex } }, svg(ICONS.edit)),
+        h('button', { className: 'action-btn', 'aria-label': 'Delete row', dataset: { action: 'delete-row', rowIndex } }, svg(ICONS.trash)));
 }
 
 function renderGrid(rows, total) {
@@ -754,63 +787,56 @@ function renderGrid(rows, total) {
     const w = document.getElementById('gridWrapper');
     if (!rows.length) {
         const filtered = document.getElementById('filterCol') && document.getElementById('filterCol').value;
-        w.innerHTML = '<div class="empty"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/></svg>'
-            + '<span class="e-title">No rows' + (filtered ? ' match this filter' : '') + '</span>'
-            + '<span class="e-hint">' + (filtered ? 'Adjust or clear the filter to see more.' : 'Use “Add row” to insert the first one.') + '</span></div>';
-        document.getElementById('pagination').innerHTML = '';
+        w.replaceChildren(emptyState(
+            'No rows' + (filtered ? ' match this filter' : ''),
+            filtered ? 'Adjust or clear the filter to see more.' : 'Use “Add row” to insert the first one.',
+            ICONS.emptyTable));
+        document.getElementById('pagination').replaceChildren();
         return;
     }
     const cols = currentSchema.map(c => c.Field);
-    let html = '<table class="grid"><thead><tr>';
-    cols.forEach((c, index) => {
-        const sorted = currentSort === c;
-        const ind = sorted ? (currentDir === 'asc' ? '▲' : '▼') : '';
-        const ariaSort = sorted ? (currentDir === 'asc' ? 'ascending' : 'descending') : 'none';
-        html += '<th class="' + (sorted ? 'sorted' : '') + '" aria-sort="' + ariaSort + '"><button data-action="sort" data-col-index="' + index + '">' + esc(c) + '<span class="sort-ind">' + ind + '</span></button></th>';
-    });
-    html += '<th class="actions-head" aria-hidden="true"></th></tr></thead><tbody class="fade-in">';
-    rows.forEach((row, idx) => {
-        html += '<tr>';
-        cols.forEach(c => {
-            const v = row[c];
-            if (v === null || v === undefined) html += '<td><span class="null-val">null</span></td>';
-            else if (typeof v === 'object') html += '<td><span class="json-val">' + esc(JSON.stringify(v)) + '</span></td>';
-            else html += '<td>' + esc(v) + '</td>';
-        });
-        html += '<td class="row-actions"><button class="action-btn" aria-label="Edit row" data-action="edit-row" data-row-index="' + idx + '"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg></button><button class="action-btn" aria-label="Delete row" data-action="delete-row" data-row-index="' + idx + '"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button></td>';
-        html += '</tr>';
-    });
-    html += '</tbody></table>';
-    w.innerHTML = html;
+    const body = h('tbody', { className: 'fade-in' },
+        rows.map((row, idx) => h('tr', {}, cols.map(c => gridCell(row[c])), rowActions(idx))));
+    w.replaceChildren(h('table', { className: 'grid' }, gridHeader(cols), body));
     renderPagination(total);
     const fa = document.getElementById('filterActive');
     const fc = document.getElementById('filterCol');
     if (fa && fc) fa.classList.toggle('show', !!fc.value);
 }
 
+function pageRange(lastPage) {
+    const range = [];
+    if (lastPage <= 7) {
+        for (let i = 1; i <= lastPage; i++) range.push(i);
+        return range;
+    }
+    range.push(1);
+    if (currentPage > 3) range.push('…');
+    for (let i = Math.max(2, currentPage - 1); i <= Math.min(lastPage - 1, currentPage + 1); i++) range.push(i);
+    if (currentPage < lastPage - 2) range.push('…');
+    range.push(lastPage);
+    return range;
+}
+
+function pageButton(content, page, { active = false, disabled = false, label } = {}) {
+    const className = 'page-btn' + (active ? ' active' : '') + (disabled ? ' disabled' : '');
+    return h('button', { className, disabled, 'aria-label': label, dataset: { action: 'go-page', page } }, content);
+}
+
 function renderPagination(total) {
     const lp = Math.max(1, Math.ceil(total / currentPerPage));
     currentLastPage = lp;
-    let html = '<div class="info"><span>' + Number(total) + ' row' + (total === 1 ? '' : 's') + '</span><select data-action="per-page" aria-label="Rows per page">';
-    [10, 25, 50, 100].forEach(n => { html += '<option value="' + n + '"' + (n === currentPerPage ? ' selected' : '') + '>' + n + ' / page</option>'; });
-    html += '</select></div><div class="pages">';
-    html += '<button class="page-btn' + (currentPage <= 1 ? ' disabled' : '') + '" aria-label="Previous page" data-action="go-page" data-page="' + (currentPage - 1) + '"' + (currentPage <= 1 ? ' disabled' : '') + '><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>';
-    const range = [];
-    if (lp <= 7) for (let i = 1; i <= lp; i++) range.push(i);
-    else {
-        range.push(1);
-        if (currentPage > 3) range.push('…');
-        for (let i = Math.max(2, currentPage - 1); i <= Math.min(lp - 1, currentPage + 1); i++) range.push(i);
-        if (currentPage < lp - 2) range.push('…');
-        range.push(lp);
-    }
-    range.forEach(p => {
-        if (p === '…') html += '<span class="page-dots">…</span>';
-        else html += '<button class="page-btn' + (p === currentPage ? ' active' : '') + '" data-action="go-page" data-page="' + p + '">' + p + '</button>';
-    });
-    html += '<button class="page-btn' + (currentPage >= lp ? ' disabled' : '') + '" aria-label="Next page" data-action="go-page" data-page="' + (currentPage + 1) + '"' + (currentPage >= lp ? ' disabled' : '') + '><svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg></button>';
-    html += '</div>';
-    document.getElementById('pagination').innerHTML = html;
+    const perPage = h('select', { 'aria-label': 'Rows per page', dataset: { action: 'per-page' } },
+        [10, 25, 50, 100].map(n => h('option', { value: n }, n + ' / page')));
+    perPage.value = String(currentPerPage);
+    const info = h('div', { className: 'info' }, h('span', {}, Number(total) + ' row' + (total === 1 ? '' : 's')), perPage);
+    const pages = h('div', { className: 'pages' },
+        pageButton(svg(ICONS.previous), currentPage - 1, { disabled: currentPage <= 1, label: 'Previous page' }),
+        pageRange(lp).map(p => p === '…'
+            ? h('span', { className: 'page-dots' }, '…')
+            : pageButton(String(p), p, { active: p === currentPage })),
+        pageButton(svg(ICONS.next), currentPage + 1, { disabled: currentPage >= lp, label: 'Next page' }));
+    document.getElementById('pagination').replaceChildren(info, pages);
 }
 
 function sortBy(c) {
@@ -830,25 +856,28 @@ function clearFilter() {
 
 /* ─── Tabs ──────────────────────────────────────────────────────── */
 
+const SCHEMA_HEADINGS = ['Column', 'Type', 'Nullable', 'Key', 'Default', 'Extra'];
+
+function schemaRow(c) {
+    return h('tr', {},
+        h('td', {}, String(c.Field)),
+        h('td', {}, h('span', { className: 'type-badge' }, String(c.Type))),
+        h('td', {}, String(c.Null || '')),
+        h('td', {}, c.Key === 'PRI' ? h('span', { className: 'pk-badge' }, 'PRIMARY') : String(c.Key || '')),
+        h('td', {}, c.Default === null ? h('span', { className: 'null-val' }, 'null') : String(c.Default)),
+        h('td', {}, String(c.Extra || '')));
+}
+
 function showTab(tab, btn) {
     document.querySelectorAll('.tab').forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
     btn.classList.add('active');
     btn.setAttribute('aria-selected', 'true');
     document.getElementById('filterBar').hidden = tab === 'schema';
     if (tab === 'schema') {
-        const w = document.getElementById('gridWrapper');
-        let html = '<div class="schema-view"><table><thead><tr><th>Column</th><th>Type</th><th>Nullable</th><th>Key</th><th>Default</th><th>Extra</th></tr></thead><tbody>';
-        currentSchema.forEach(c => {
-            html += '<tr><td>' + esc(c.Field) + '</td>'
-                + '<td><span class="type-badge">' + esc(c.Type) + '</span></td>'
-                + '<td>' + esc(c.Null || '') + '</td>'
-                + '<td>' + (c.Key === 'PRI' ? '<span class="pk-badge">PRIMARY</span>' : esc(c.Key || '')) + '</td>'
-                + '<td>' + (c.Default === null ? '<span class="null-val">null</span>' : esc(c.Default)) + '</td>'
-                + '<td>' + esc(c.Extra || '') + '</td></tr>';
-        });
-        html += '</tbody></table></div>';
-        w.innerHTML = html;
-        document.getElementById('pagination').innerHTML = '';
+        const head = h('thead', {}, h('tr', {}, SCHEMA_HEADINGS.map(heading => h('th', {}, heading))));
+        const body = h('tbody', {}, currentSchema.map(schemaRow));
+        document.getElementById('gridWrapper').replaceChildren(h('div', { className: 'schema-view' }, h('table', {}, head, body)));
+        document.getElementById('pagination').replaceChildren();
     } else {
         loadRows();
     }
@@ -930,8 +959,7 @@ function tableTitle(prefix) {
 
 function openModal({ title, body, footer, narrow = false }) {
     modalTrigger = document.activeElement;
-    const closeButton = h('button', { className: 'modal-close', 'aria-label': 'Close', dataset: { action: 'close-modal' } });
-    closeButton.innerHTML = ICONS.close;
+    const closeButton = h('button', { className: 'modal-close', 'aria-label': 'Close', dataset: { action: 'close-modal' } }, svg(ICONS.close));
     const dialog = h('div', { className: 'modal' + (narrow ? ' narrow' : ''), role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'modal-title' },
         h('div', { className: 'modal-header' }, h('h2', { id: 'modal-title' }, title), closeButton),
         h('div', { className: 'modal-body' }, body),

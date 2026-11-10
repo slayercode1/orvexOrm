@@ -8,6 +8,7 @@ local studioToken = nil
 local studioTokenExpiresAt = 0
 local Errors = OrvexErrors or require("utils.errors")
 local Logger = OrvexLogger or require("utils.logger")
+local Helpers = OrvexHelpers or require("utils.helpers")
 
 -- ─── Brute-force protection ─────────────────────────────────────────
 
@@ -18,18 +19,66 @@ local MAX_BODY_BYTES = 1024 * 1024
 local REQUEST_WINDOW_SECONDS = 60
 local MAX_REQUESTS_PER_WINDOW = 120
 
----@type table<string, { count: integer, lockedUntil: number }>
+local MAX_TRACKED_ADDRESSES = 2048
+
+-- Both stores are keyed on the client host taken from req.address. FXServer
+-- reports the TCP peer, so behind a same-host reverse proxy every client
+-- shares 127.0.0.1: one lockout or rate window then applies to everyone.
+
+---@type table<string, { count: integer, lockedUntil: number, lastFailureAt: number, lockoutReported: boolean|nil }>
 local failedAttempts = {}
+---@type table<string, { startedAt: number, count: integer }>
 local requestWindows = {}
 
-local function boundedSet(store, key, value)
+-- An eviction policy tells a bounded store which entries are dead and,
+-- among live ones, which to drop first: active limits are dropped last.
+local FAILED_ATTEMPTS_POLICY = {
+    isExpired = function(entry, now) return entry.lockedUntil > 0 and now >= entry.lockedUntil end,
+    evictionRank = function(entry, now)
+        if entry.lockedUntil > now then return math.huge, entry.lockedUntil end
+        return 0, entry.lastFailureAt
+    end,
+}
+
+local REQUEST_WINDOWS_POLICY = {
+    isExpired = function(window, now) return now - window.startedAt >= REQUEST_WINDOW_SECONDS end,
+    evictionRank = function(window)
+        if window.count > MAX_REQUESTS_PER_WINDOW then return math.huge, window.startedAt end
+        return 0, window.startedAt
+    end,
+}
+
+local function countEntries(store)
     local count = 0
-    for _ in pairs(store) do
-        count = count + 1
-        if count >= 2048 then
-            for existing in pairs(store) do store[existing] = nil end
-            break
+    for _ in pairs(store) do count = count + 1 end
+    return count
+end
+
+local function pruneExpired(store, policy, now)
+    for key, entry in pairs(store) do
+        if policy.isExpired(entry, now) then store[key] = nil end
+    end
+end
+
+local function evictLowestRanked(store, policy, now)
+    local victim, victimTier, victimAge
+    for key, entry in pairs(store) do
+        local tier, age = policy.evictionRank(entry, now)
+        if not victim or tier < victimTier or (tier == victimTier and age < victimAge) then
+            victim, victimTier, victimAge = key, tier, age
         end
+    end
+    if victim then store[victim] = nil end
+end
+
+-- Keeps a store under MAX_TRACKED_ADDRESSES without ever clearing it
+-- wholesale: expired entries go first, then the oldest inactive one, and an
+-- active lockout or exceeded window only when nothing else is left.
+local function boundedSet(store, policy, key, value)
+    if store[key] == nil and countEntries(store) >= MAX_TRACKED_ADDRESSES then
+        local now = os.time()
+        pruneExpired(store, policy, now)
+        if countEntries(store) >= MAX_TRACKED_ADDRESSES then evictLowestRanked(store, policy, now) end
     end
     store[key] = value
 end
@@ -52,20 +101,51 @@ end
 local function registerFailure(address)
     local entry = failedAttempts[address] or { count = 0, lockedUntil = 0 }
     entry.count = entry.count + 1
+    entry.lastFailureAt = os.time()
     if entry.count >= MAX_FAILED_ATTEMPTS then
         entry.lockedUntil = os.time() + LOCKOUT_SECONDS
         print(("^1[OrvexORM Studio] %s locked out after %d failed token attempts.^0"):format(address, entry.count))
     end
-    boundedSet(failedAttempts, address, entry)
+    boundedSet(failedAttempts, FAILED_ATTEMPTS_POLICY, address, entry)
 end
 
 -- ─── Token generation ──────────────────────────────────────────────
 
+local MIN_TOKEN_LENGTH = 32
+local MIN_TOKEN_DISTINCT_CHARACTERS = 10
+local MIN_TOKEN_ENTROPY_BITS = 128
+local WEAK_TOKEN_MESSAGE = "orvex_studio_token is too weak: use at least 32 random characters "
+    .. "(128 bits or more). Generate one with: openssl rand -hex 32"
+
+local function distinctCharacterCount(text)
+    local seen, count = {}, 0
+    for character in text:gmatch(".") do
+        if not seen[character] then
+            seen[character] = true
+            count = count + 1
+        end
+    end
+    return count
+end
+
+-- Upper bound of the entropy a token can carry: length * log2(alphabet used).
+-- It rejects short, repetitive or tiny-alphabet tokens; `openssl rand -hex 32`
+-- (64 hex chars, ~256 bits) and `openssl rand -base64 32` pass comfortably.
+local function isStrongToken(token)
+    if #token < MIN_TOKEN_LENGTH then return false end
+    local distinct = distinctCharacterCount(token)
+    if distinct < MIN_TOKEN_DISTINCT_CHARACTERS then return false end
+    return #token * math.log(distinct, 2) >= MIN_TOKEN_ENTROPY_BITS
+end
+
+---@return string|nil token the configured token, nil when none is configured
+---@return string|nil err set when a token is configured but too weak
 local function configuredToken()
     if type(GetConvar) ~= "function" then return nil end
     local token = GetConvar("orvex_studio_token", "")
-    if #token >= 32 then return token end
-    return nil
+    if token == "" then return nil end
+    if not isStrongToken(token) then return nil, WEAK_TOKEN_MESSAGE end
+    return token
 end
 
 local function toHex(bytes)
@@ -84,24 +164,52 @@ local function secureRandomHex(byteCount)
 end
 
 local function generateToken()
-    local provided = configuredToken()
+    local provided, weakTokenError = configuredToken()
+    if weakTokenError then return nil, weakTokenError end
     if provided then return provided end
 
     local token = secureRandomHex(32)
     if not token then
-        return nil, "Secure randomness is unavailable. Set orvex_studio_token to at least 32 random characters."
+        return nil, "Secure randomness is unavailable. Set orvex_studio_token to a random token "
+            .. "(generate one with: openssl rand -hex 32)."
     end
     return token
 end
 
--- A CSP nonce only has to be unguessable by content stored in the database,
--- so a math.random fallback keeps Windows hosts (no /dev/urandom) working.
-local function generateNonce()
-    local nonce = secureRandomHex(16)
-    if nonce then return nonce end
+local NONCE_FALLBACK_WARNING = "No /dev/urandom on this host: the CSP nonce is weaker on this host "
+    .. "(math.random seeded from the clock and the token). The page has no HTML injection sink for "
+    .. "database values, so the nonce is defense-in-depth only. The token itself stays secure."
+
+local function hasSecureRandom()
+    local source = io.open("/dev/urandom", "rb")
+    if not source then return false end
+    source:close()
+    return true
+end
+
+local function foldBytes(text)
+    local folded = 0
+    for index = 1, #text do folded = (folded * 31 + text:byte(index)) % 0x7FFFFFFF end
+    return folded
+end
+
+-- Hosts without /dev/urandom (Windows) get a math.random nonce, seeded once
+-- per activation. Acceptable only for the nonce: the token never falls back.
+local function prepareNonceSource(token)
+    if hasSecureRandom() then return end
+    math.randomseed(os.time() ~ math.floor(os.clock() * 1000000) ~ foldBytes(token))
+    print("^3[OrvexORM Studio] " .. NONCE_FALLBACK_WARNING .. "^0")
+end
+
+local function weakRandomHex(byteCount)
     local bytes = {}
-    for index = 1, 16 do bytes[index] = string.char(math.random(0, 255)) end
+    for index = 1, byteCount do bytes[index] = string.char(math.random(0, 255)) end
     return toHex(table.concat(bytes))
+end
+
+---@return string nonce
+local function generateNonce()
+    return secureRandomHex(16) or weakRandomHex(16)
 end
 
 local function constantTimeEquals(left, right)
@@ -121,7 +229,7 @@ local function exceedsRequestLimit(address)
     local now = os.time()
     local window = requestWindows[address]
     if not window or now - window.startedAt >= REQUEST_WINDOW_SECONDS then
-        boundedSet(requestWindows, address, { startedAt = now, count = 1 })
+        boundedSet(requestWindows, REQUEST_WINDOWS_POLICY, address, { startedAt = now, count = 1 })
         return false, false
     end
     window.count = window.count + 1
@@ -140,6 +248,8 @@ end
 -- ─── Network allowlist ─────────────────────────────────────────────
 -- Convar orvex_studio_allow: addresses or IPv4 CIDR ranges separated by
 -- commas or spaces, "*" for any address. Loopback only by default.
+-- Matched against req.address, the TCP peer: behind a same-host reverse
+-- proxy every client is 127.0.0.1, so the default admits the whole proxy.
 
 local DEFAULT_ALLOWED_ADDRESSES = "127.0.0.1, ::1"
 
@@ -283,7 +393,7 @@ end
 -- ─── SQL safe identifier ───────────────────────────────────────────
 
 local function safeName(name)
-    if not name or not name:match("^[%w_]+$") then return nil end
+    if type(name) ~= "string" or not name:match("^[%w_]+$") then return nil end
     return "`" .. name .. "`"
 end
 
@@ -392,21 +502,41 @@ local function apiRows(tableName, params)
     return { rows = rows, total = total, page = page, perPage = perPage }
 end
 
+-- Only JSON scalars are bound: a table would let the driver expand it
+-- into `key` = value pairs or a list. JSON null decodes to nil.
+local function requireScalar(value, label)
+    if not Helpers.isBindable(value) then
+        error(Errors.new("VALIDATION_ERROR", label .. " must be a string, number, boolean or null"))
+    end
+end
+
+---@return string[] columns quoted column names, in the same order as values
+---@return any[] values
+local function columnValues(data)
+    if type(data) ~= "table" or (next(data) ~= nil and isArray(data)) then
+        error(Errors.new("VALIDATION_ERROR", "Row data must be an object of columns"))
+    end
+    local columns, values = {}, {}
+    for name, value in pairs(data) do
+        requireScalar(value, "Column values")
+        local column = safeName(name)
+        if column then
+            columns[#columns + 1] = column
+            values[#values + 1] = value
+        end
+    end
+    if #columns == 0 then error(Errors.new("VALIDATION_ERROR", "No valid columns")) end
+    return columns, values
+end
+
 local function apiInsert(tableName, body)
     local tn = safeName(tableName)
     if not tn then error(Errors.new("VALIDATION_ERROR", "Invalid table name")) end
     if not body or type(body) ~= "table" then error(Errors.new("VALIDATION_ERROR", "Missing JSON body")) end
 
-    local cols, vals, placeholders = {}, {}, {}
-    for k, v in pairs(body) do
-        local sc = safeName(k)
-        if sc then
-            cols[#cols + 1] = sc
-            vals[#vals + 1] = v
-            placeholders[#placeholders + 1] = "?"
-        end
-    end
-    if #cols == 0 then error(Errors.new("VALIDATION_ERROR", "No valid columns")) end
+    local cols, vals = columnValues(body)
+    local placeholders = {}
+    for index = 1, #cols do placeholders[index] = "?" end
 
     local sql = "INSERT INTO " .. tn .. " (" .. table.concat(cols, ", ") .. ") VALUES (" .. table.concat(placeholders, ", ") .. ")"
     local id = dbExecute(sql, vals)
@@ -422,16 +552,11 @@ local function apiUpdate(tableName, body)
     if not pkCol then error(Errors.new("VALIDATION_ERROR", "Invalid primary key")) end
 
     if body.pkValue == nil then error(Errors.new("VALIDATION_ERROR", "Missing primary key value")) end
+    requireScalar(body.pkValue, "The primary key value")
 
-    local setClauses, vals = {}, {}
-    for k, v in pairs(body.data) do
-        local sc = safeName(k)
-        if sc then
-            setClauses[#setClauses + 1] = sc .. " = ?"
-            vals[#vals + 1] = v
-        end
-    end
-    if #setClauses == 0 then error(Errors.new("VALIDATION_ERROR", "No valid columns")) end
+    local cols, vals = columnValues(body.data)
+    local setClauses = {}
+    for index, column in ipairs(cols) do setClauses[index] = column .. " = ?" end
     vals[#vals + 1] = body.pkValue
 
     local sql = "UPDATE " .. tn .. " SET " .. table.concat(setClauses, ", ") .. " WHERE " .. pkCol .. " = ?"
@@ -447,6 +572,7 @@ local function apiDelete(tableName, body)
     local pkCol = safeName(body.pk)
     if not pkCol then error(Errors.new("VALIDATION_ERROR", "Invalid primary key")) end
     if body.pkValue == nil then error(Errors.new("VALIDATION_ERROR", "Missing primary key value")) end
+    requireScalar(body.pkValue, "The primary key value")
 
     local sql = "DELETE FROM " .. tn .. " WHERE " .. pkCol .. " = ? LIMIT 1"
     local affected = dbExecute(sql, { body.pkValue })
@@ -578,6 +704,31 @@ local function requestTokenFrom(req, path, params)
     return nil
 end
 
+local function hasRequestBody(method)
+    return method == "POST" or method == "PUT" or method == "DELETE"
+end
+
+---@return integer|nil length the declared Content-Length, nil for a chunked body
+local function declaredBodyLength(headers)
+    local transferEncoding = headerValue(headers, "transfer-encoding")
+    if type(transferEncoding) == "string" and transferEncoding:lower():find("chunked", 1, true) then return nil end
+    return tonumber(headerValue(headers, "content-length")) or 0
+end
+
+-- FXServer has no req.body: it hands the complete body to the callback given
+-- to req.setDataHandler, and only when the request has one (Content-Length
+-- > 0 or chunked). Without a body that callback never runs, so answer at once.
+-- A declared oversize is refused before buffering; a chunked one on delivery.
+local function readRequestBody(req, onBody, onTooLarge)
+    local declared = declaredBodyLength(req.headers or {})
+    if (declared and declared <= 0) or type(req.setDataHandler) ~= "function" then return onBody("") end
+    if declared and declared > MAX_BODY_BYTES then return onTooLarge() end
+    req.setDataHandler(function(data)
+        if type(data) ~= "string" or #data > MAX_BODY_BYTES then return onTooLarge() end
+        onBody(data)
+    end)
+end
+
 local function dispatchApi(path, method, params, body)
     if path == "/api/tables" and method == "GET" then return apiTables() end
     local tableName = path:match("^/api/tables/([^/]+)/schema$")
@@ -591,6 +742,17 @@ local function dispatchApi(path, method, params, body)
     if tableName and method == "DELETE" then return apiDelete(tableName, body) end
     if path == "/api/connection" and method == "GET" then return apiConnection() end
     error(Errors.new("NOT_FOUND", "Unknown Studio route"))
+end
+
+local function respondToApi(res, path, method, params, body, context)
+    local stack
+    local ok, result = xpcall(function() return dispatchApi(path, method, params, body) end, function(thrown)
+        stack = debug and debug.traceback and debug.traceback("", 2) or nil
+        return thrown
+    end)
+    if ok then return sendJson(res, 200, result, context.correlationId) end
+    context.stack = stack
+    sendError(res, result, context)
 end
 
 local function handleRequest(req, res)
@@ -651,28 +813,19 @@ local function handleRequest(req, res)
 
     if isPageRoute(path) then return sendStudioPage(res) end
 
-    local hasBody = method == "POST" or method == "PUT" or method == "DELETE"
-    if hasBody and type(req.body) == "string" and #req.body > MAX_BODY_BYTES then
-        sendError(res, Errors.new("VALIDATION_ERROR", "Studio request body exceeds the size limit"), {
-            correlationId = correlationId, route = path, method = method,
-        })
-        return
-    end
-    local body = hasBody and jsonDecode(req.body) or nil
-    if hasBody and req.body and req.body ~= "" and not body then
-        sendError(res, Errors.new("VALIDATION_ERROR", "Malformed JSON body"), {
-            correlationId = correlationId, route = path, method = method,
-        })
-        return
-    end
+    local context = { correlationId = correlationId, route = path, method = method }
+    if not hasRequestBody(method) then return respondToApi(res, path, method, params, nil, context) end
 
-    local stack
-    local ok, result = xpcall(function() return dispatchApi(path, method, params, body) end, function(thrown)
-        stack = debug and debug.traceback and debug.traceback("", 2) or nil
-        return thrown
+    -- The token was verified above: an unauthenticated body is never read.
+    readRequestBody(req, function(rawBody)
+        local body = jsonDecode(rawBody)
+        if rawBody ~= "" and body == nil then
+            return sendError(res, Errors.new("VALIDATION_ERROR", "Malformed JSON body"), context)
+        end
+        respondToApi(res, path, method, params, body, context)
+    end, function()
+        sendError(res, Errors.new("VALIDATION_ERROR", "Studio request body exceeds the size limit"), context)
     end)
-    if ok then sendJson(res, 200, result, correlationId)
-    else sendError(res, result, { correlationId = correlationId, route = path, method = method, stack = stack }) end
 end
 
 -- ─── Register HTTP handler ─────────────────────────────────────────
@@ -716,6 +869,7 @@ RegisterCommand("orvexstudio", function(source, args)
         print("^1[OrvexORM Studio] " .. tokenError .. "^0")
         return
     end
+    prepareNonceSource(token)
     local allowListLabel
     allowedAddresses, allowListLabel = loadAllowList()
     studioToken = token
@@ -731,8 +885,13 @@ RegisterCommand("orvexstudio", function(source, args)
     print("^5══════════════════════════════════════════════════^0")
     print("")
     print("^2  URL : ^6http://localhost:30120/" .. endpoint .. "/?token=" .. studioToken .. "^0")
+    print("^1  This URL holds the token: console output may be mirrored to txAdmin and log files, stop the Studio when done.^0")
     print("")
     print("^2  Allowed addresses : ^6" .. (allowListLabel ~= "" and allowListLabel or "none") .. "^0 (convar orvex_studio_allow)")
+    print("")
+    print("^3  The allowlist and the lockout use the TCP peer address (req.address).^0")
+    print("^3  Behind a reverse proxy on the same host every client looks like 127.0.0.1:^0")
+    print("^3  the loopback default then admits everyone the proxy serves.^0")
     print("")
     print("^3  Share this URL only with trusted people.^0")
     print("^3  Traffic is plain HTTP: from a remote machine, use an SSH tunnel^0")
