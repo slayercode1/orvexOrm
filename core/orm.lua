@@ -1,5 +1,7 @@
 -- core/orm.lua
 
+-- luacheck: read globals GetResourceMetadata
+
 local ModelFactory  = OrvexModelFactory or require("core.model")
 local Adapter       = OrvexAdapter or require("database.adapter")
 local MySQLDriver   = OrvexMySQLDriver or require("database.mysql")
@@ -12,7 +14,21 @@ local Helpers       = OrvexHelpers or require("utils.helpers")
 ---@class OrvexORM
 local ORM = {}
 
-ORM.version = "1.2.1"
+--- Name of the resource that ships the ORM. Not GetCurrentResourceName():
+--- lib/import.lua runs this file inside consumer resources too.
+local ORVEX_RESOURCE = "orvexorm"
+
+--- fxmanifest.lua is the single source of the version. Outside FiveM
+--- (tests, tooling) there is no resource metadata, hence the fallback.
+---@return string
+local function resourceVersion()
+    if type(GetResourceMetadata) ~= "function" then
+        return "dev"
+    end
+    return GetResourceMetadata(ORVEX_RESOURCE, "version", 0) or "dev"
+end
+
+ORM.version = resourceVersion()
 
 ---@type OrvexAdapter
 local defaultAdapter = Adapter.new(MySQLDriver.new())
@@ -33,17 +49,23 @@ end
 
 --- If a function is passed, it is called with the transaction and auto-committed.
 --- On error, the transaction is not committed and the error is re-raised.
----@param adapterOrFn? OrvexAdapter|fun(tx: OrvexTransaction)
+--- After a successful commit, the shared model cache drops the entries of
+--- every table the transaction wrote (all entries for raw statements whose
+--- tables cannot be told). Models built with their own `opts.cache` are
+--- not covered: call `Model.flushCache()` on them.
+--- Without a function, returns the transaction to fill and `commit()`.
+---@param adapterOrFn fun(tx: OrvexTransaction)
 ---@param adapter? OrvexAdapter
----@return OrvexTransaction|boolean
+---@return boolean success
+---@overload fun(adapter?: OrvexAdapter): OrvexTransaction
 function ORM.transaction(adapterOrFn, adapter)
     if type(adapterOrFn) == "function" then
-        local tx = Transaction.new(adapter or defaultAdapter)
+        local tx = Transaction.new(adapter or defaultAdapter, globalCache)
         adapterOrFn(tx)
         return tx:commit()
     end
 
-    return Transaction.new(adapterOrFn or defaultAdapter)
+    return Transaction.new(adapterOrFn or defaultAdapter, globalCache)
 end
 
 ---@param opts? { ttl?: number }
@@ -63,7 +85,7 @@ function ORM.flushCache()
     globalCache:flush()
 end
 
----@return { hits: integer, misses: integer, hitRate: number, entries: integer }
+---@return OrvexCacheStats
 function ORM.cacheStats()
     return globalCache:stats()
 end
@@ -73,22 +95,29 @@ function ORM.setAdapter(adapter)
     defaultAdapter = adapter
 end
 
+--- Raw SQL bypasses the models, so a write invalidates the shared cache
+--- for the table it names, or flushes it when the table cannot be told.
 ---@param sql string
 ---@param params? any[]
 ---@return table[] rows
 function ORM.raw(sql, params)
     params = params or {}
     Logger.query(sql, params)
-    return defaultAdapter:execute(sql, params) or {}
+    local rows = defaultAdapter:execute(sql, params) or {}
+    Transaction.invalidateWritten(globalCache, sql)
+    return rows
 end
 
+--- See `ORM.raw` for the cache invalidation.
 ---@param sql string
 ---@param params? any[]
 ---@return any
 function ORM.rawExec(sql, params)
     params = params or {}
     Logger.query(sql, params)
-    return defaultAdapter:scalar(sql, params)
+    local result = defaultAdapter:scalar(sql, params)
+    Transaction.invalidateWritten(globalCache, sql)
+    return result
 end
 
 ---@param enabled boolean
@@ -181,7 +210,7 @@ function ORM.introspect(tableName, adapter)
     local sql = "DESCRIBE `" .. tableName .. "`"
     Logger.query(sql, {})
     local rows = adapter:execute(sql, {})
-    assert(rows and #rows > 0, ("Table '%s' not found or empty"):format(tableName))
+    Helpers.ensure(rows and #rows > 0, ("Table '%s' not found or empty"):format(tableName))
 
     local fields = {}
     local pk = "id"
@@ -213,14 +242,18 @@ end
 ---@param opts? OrvexModelOpts
 ---@return OrvexModel
 function ORM.fromTable(tableName, opts)
-    opts = opts or {}
+    -- Copy: the detected primary key must not leak into the caller's opts.
+    opts = Helpers.shallowCopy(opts or {})
     local adapter = opts.adapter or defaultAdapter
     local fields, pk = ORM.introspect(tableName, adapter)
     opts.primaryKey = opts.primaryKey or pk
     return ORM.model(tableName, fields, opts)
 end
 
----@return function model, function raw, function migrate, function transaction
+---@return fun(tableName: string, fields: table<string, OrvexFieldType>, opts?: OrvexModelOpts): OrvexModel model
+---@return fun(sql: string, params?: any[]): table[] raw
+---@return fun(adapter?: OrvexAdapter): number migrate
+---@return (fun(fn: fun(tx: OrvexTransaction), adapter?: OrvexAdapter): boolean)|(fun(adapter?: OrvexAdapter): OrvexTransaction) transaction
 function ORM.unpack()
     return ORM.model, ORM.raw, ORM.migrate, ORM.transaction
 end

@@ -31,24 +31,35 @@ function Validator.checkType(field, value, fieldType)
     return true
 end
 
---- Only validates fields present in data (fast path).
+---@param field string
+---@param value any
+---@param fields table<string, OrvexFieldType>
+---@return boolean ok
+---@return string|nil error
+local function checkField(field, value, fields)
+    local fieldType = fields[field]
+    if not fieldType then
+        return false, ("Unknown field '%s'"):format(tostring(field))
+    end
+    return Validator.checkType(field, value, fieldType)
+end
+
+--- Only validates fields present in data (fast path). When several fields
+--- are invalid, the one reported is the first in sorted order, so the
+--- message does not depend on the table's hash order.
 ---@param data table
 ---@param fields table<string, OrvexFieldType>
 ---@return boolean ok
 ---@return string|nil firstError
 function Validator.validate(data, fields)
-    for key, value in pairs(data) do
-        local fieldType = fields[key]
-        if not fieldType then
-            return false, ("Unknown field '%s'"):format(key)
-        end
-        if value ~= nil then
-            local expected = TYPE_MAP[fieldType]
-            if expected and type(value) ~= expected then
-                return false, ("Field '%s': expected %s, got %s"):format(key, expected, type(value))
-            end
+    local firstField, firstError
+    for field, value in pairs(data) do
+        local ok, err = checkField(field, value, fields)
+        if not ok and (firstField == nil or tostring(field) < tostring(firstField)) then
+            firstField, firstError = field, err
         end
     end
+    if firstError then return false, firstError end
     return true
 end
 

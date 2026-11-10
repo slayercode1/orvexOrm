@@ -52,7 +52,5 @@ function Errors.toResponse(appError, errorId)
     return response
 end
 
-function Errors.definition(code) return definitions[code] end
-
 OrvexErrors = Errors
 return Errors

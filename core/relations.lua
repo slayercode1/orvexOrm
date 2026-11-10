@@ -1,6 +1,8 @@
 -- core/relations.lua
 
-local Query = OrvexQuery or require("core.query")
+local Query   = OrvexQuery or require("core.query")
+local Builder = OrvexBuilder or require("core.builder")
+local Helpers = OrvexHelpers or require("utils.helpers")
 
 ---@alias OrvexRelationType "hasOne"|"hasMany"|"belongsTo"|"belongsToMany"
 
@@ -21,44 +23,80 @@ Relations.HAS_MANY         = "hasMany"
 Relations.BELONGS_TO       = "belongsTo"
 Relations.BELONGS_TO_MANY  = "belongsToMany"
 
+-- ─── Related rows lookup ───────────────────────────────────────────
+
+--- Column of the lookup table that holds the parent's key: the related
+--- table for hasOne/hasMany/belongsTo, the pivot for belongsToMany.
+---@param rel OrvexRelationDef
+---@return string qualified `table.column`
+function Relations.lookupColumn(rel)
+    if rel.type == Relations.BELONGS_TO_MANY then
+        return rel.pivot .. "." .. rel.foreignKey
+    elseif rel.type == Relations.BELONGS_TO then
+        return rel.model._tableName .. "." .. rel.ownerKey
+    end
+    return rel.model._tableName .. "." .. rel.foreignKey
+end
+
+--- Raw-row builder over the related table: joined through the pivot for
+--- belongsToMany, and without the related model's trashed rows. Shared by
+--- relation loading, whereHas and countByRelation so they always agree.
+---@param rel OrvexRelationDef
+---@return OrvexBuilder
+function Relations.relatedQuery(rel)
+    local related = rel.model
+    local relatedTable = related._tableName
+    local b = Builder.new(relatedTable, related._adapter, nil, nil)
+
+    if rel.type == Relations.BELONGS_TO_MANY then
+        b:select(relatedTable .. ".*")
+        b:innerJoin(rel.pivot, rel.pivot .. "." .. rel.otherKey, relatedTable .. "." .. related._primaryKey)
+    end
+    if related._softDelete then
+        b:constrain(function(q) q:whereNull(relatedTable .. ".deleted_at") end)
+    end
+    return b
+end
+
 -- ─── Fetchers ──────────────────────────────────────────────────────
+-- A nil key matches nothing: querying with it would drop the condition
+-- and return unrelated rows, so the fetchers short-circuit instead.
 
 ---@param instance OrvexInstance
 ---@param rel OrvexRelationDef
 ---@return OrvexInstance|nil
 function Relations.fetchHasOne(instance, rel)
-    return rel.model.find({ [rel.foreignKey] = instance[rel.localKey] })
+    local key = instance[rel.localKey]
+    if key == nil then return nil end
+    return rel.model.find({ [rel.foreignKey] = key })
 end
 
 ---@param instance OrvexInstance
 ---@param rel OrvexRelationDef
 ---@return OrvexInstance[]
 function Relations.fetchHasMany(instance, rel)
-    return rel.model.findAll({ [rel.foreignKey] = instance[rel.localKey] })
+    local key = instance[rel.localKey]
+    if key == nil then return {} end
+    return rel.model.findAll({ [rel.foreignKey] = key })
 end
 
 ---@param instance OrvexInstance
 ---@param rel OrvexRelationDef
 ---@return OrvexInstance|nil
 function Relations.fetchBelongsTo(instance, rel)
-    return rel.model.find({ [rel.ownerKey] = instance[rel.foreignKey] })
+    local key = instance[rel.foreignKey]
+    if key == nil then return nil end
+    return rel.model.find({ [rel.ownerKey] = key })
 end
 
 ---@param instance OrvexInstance
 ---@param rel OrvexRelationDef
 ---@return OrvexInstance[]
 function Relations.fetchBelongsToMany(instance, rel)
-    local q = Query.selectJoin(
-        rel.model._tableName,
-        rel.pivot,
-        rel.otherKey,
-        rel.model._primaryKey,
-        rel.foreignKey,
-        instance[rel.localKey]
-    )
-    local rows = rel.model._adapter:execute(q.sql, q.params)
-    if not rows then return {} end
+    local key = instance[rel.localKey]
+    if key == nil then return {} end
 
+    local rows = Relations.relatedQuery(rel):where(Relations.lookupColumn(rel), key):get()
     local results = {}
     for i, row in ipairs(rows) do
         results[i] = rel.model._wrapRow(row)
@@ -67,31 +105,43 @@ function Relations.fetchBelongsToMany(instance, rel)
 end
 
 -- ─── Pivot helpers ─────────────────────────────────────────────────
+-- Both keys are required: a nil one would drop its condition, and detach
+-- would then delete the links of every parent (or every related row).
 
 ---@param instance OrvexInstance
 ---@param rel OrvexRelationDef
----@param relatedInstance OrvexInstance
+---@param relatedInstance OrvexInstance|table
+---@param method string
+---@return table<string, any> pivot row identifying the link
+local function pivotKeys(instance, rel, relatedInstance, method)
+    local parentKey = instance[rel.localKey]
+    local relatedKey = type(relatedInstance) == "table" and relatedInstance[rel.model._primaryKey] or nil
+    Helpers.ensure(parentKey ~= nil,
+        ("%s(): the parent has no '%s' value"):format(method, tostring(rel.localKey)))
+    Helpers.ensure(relatedKey ~= nil,
+        ("%s(): the related row has no '%s' value"):format(method, rel.model._primaryKey))
+    return {
+        [rel.foreignKey] = parentKey,
+        [rel.otherKey]   = relatedKey,
+    }
+end
+
+---@param instance OrvexInstance
+---@param rel OrvexRelationDef
+---@param relatedInstance OrvexInstance|table
 ---@return boolean
 function Relations.attach(instance, rel, relatedInstance)
-    local data = {
-        [rel.foreignKey] = instance[rel.localKey],
-        [rel.otherKey]   = relatedInstance[rel.model._primaryKey],
-    }
-    local q = Query.insert(rel.pivot, data)
+    local q = Query.insert(rel.pivot, pivotKeys(instance, rel, relatedInstance, "attach"))
     rel.model._adapter:scalar(q.sql, q.params)
     return true
 end
 
 ---@param instance OrvexInstance
 ---@param rel OrvexRelationDef
----@param relatedInstance OrvexInstance
+---@param relatedInstance OrvexInstance|table
 ---@return boolean
 function Relations.detach(instance, rel, relatedInstance)
-    local where = {
-        [rel.foreignKey] = instance[rel.localKey],
-        [rel.otherKey]   = relatedInstance[rel.model._primaryKey],
-    }
-    local q = Query.delete(rel.pivot, where)
+    local q = Query.delete(rel.pivot, pivotKeys(instance, rel, relatedInstance, "detach"))
     rel.model._adapter:scalar(q.sql, q.params)
     return true
 end

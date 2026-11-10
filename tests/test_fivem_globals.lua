@@ -1,50 +1,11 @@
 -- tests/test_fivem_globals.lua
 -- Simulates FiveM loading order (no require, globals only)
--- Run: docker run --rm -v "$(pwd)":/app -w /app nickblah/lua:5.3 lua tests/test_fivem_globals.lua
+-- Run: docker run --rm -v "$(pwd)":/app -w /app nickblah/lua:5.4 lua tests/test_fivem_globals.lua
 
 -- ─── Mock FiveM globals ────────────────────────────────────────────
 
-json = {
-    encode = function(t)
-        if type(t) ~= "table" then return tostring(t) end
-        local isArray = #t > 0
-        if isArray then
-            local parts = {}
-            for _, v in ipairs(t) do
-                if type(v) == "string" then parts[#parts + 1] = '"' .. v .. '"'
-                elseif type(v) == "table" then parts[#parts + 1] = json.encode(v)
-                else parts[#parts + 1] = tostring(v) end
-            end
-            return "[" .. table.concat(parts, ",") .. "]"
-        else
-            local parts = {}
-            for k, v in pairs(t) do
-                local val
-                if type(v) == "string" then val = '"' .. v .. '"'
-                elseif type(v) == "table" then val = json.encode(v)
-                else val = tostring(v) end
-                parts[#parts + 1] = '"' .. k .. '":' .. val
-            end
-            table.sort(parts)
-            return "{" .. table.concat(parts, ",") .. "}"
-        end
-    end,
-    decode = function(s)
-        if s:sub(1, 1) == "{" then
-            local t = {}
-            for k, v in s:gmatch('"([^"]+)":([^,}]+)') do
-                if v:sub(1, 1) == '"' then t[k] = v:sub(2, -2)
-                elseif v == "true" then t[k] = true
-                elseif v == "false" then t[k] = false
-                else t[k] = tonumber(v) or v end
-            end
-            return t
-        elseif s:sub(1, 1) == "[" then
-            return { s }
-        end
-        return s
-    end,
-}
+-- Real JSON codec: escaping and array round-trips are exercised for real.
+json = require("tests.support.json")
 
 local _db_log = {}
 local _mock_results = {}
@@ -128,25 +89,39 @@ exports = setmetatable({}, {
 
 print("\n== Loading OrvexORM via globals (FiveM mode) ==")
 
-dofile("utils/helpers.lua")
-dofile("utils/serializer.lua")
-dofile("utils/validator.lua")
-dofile("utils/cache.lua")
-dofile("utils/errors.lua")
-dofile("utils/logger.lua")
+--- Loads every server script in fxmanifest order with `require` disabled,
+--- so a module that reads a global defined by a later file fails here as
+--- it would in FiveM. lib/studio.lua is a dev UI with its own suite.
+local SKIPPED_SCRIPTS = { ["lib/studio.lua"] = true }
 
-dofile("database/mysql.lua")
-dofile("database/adapter.lua")
+local function manifestServerScripts()
+    local f = assert(io.open("fxmanifest.lua", "r"))
+    local manifest = f:read("a")
+    f:close()
+    local block = assert(manifest:match("server_scripts%s*{(.-)}"), "fxmanifest has no server_scripts block")
+    local scripts = {}
+    for path in block:gmatch("'([^']+)'") do
+        scripts[#scripts + 1] = path
+    end
+    return scripts
+end
 
-dofile("core/schema.lua")
-dofile("core/query.lua")
-dofile("core/relations.lua")
-dofile("core/builder.lua")
-dofile("core/transaction.lua")
-dofile("core/migration.lua")
-dofile("core/model.lua")
-dofile("core/orm.lua")
-dofile("lib/export.lua")
+--- FiveM natives reading the manifest metadata.
+local MANIFEST_VERSION = io.open("fxmanifest.lua"):read("a"):match("\nversion '([^']+)'")
+function GetCurrentResourceName() return "orvexorm" end
+function GetResourceMetadata(resource, key, index)
+    if resource == "orvexorm" and key == "version" and index == 0 then return MANIFEST_VERSION end
+    return nil
+end
+
+local realRequire = require
+rawset(_G, "require", function(name)
+    error(("require('%s') called while loading: FiveM has no require, fix the fxmanifest order"):format(name), 2)
+end)
+for _, path in ipairs(manifestServerScripts()) do
+    if not SKIPPED_SCRIPTS[path] then dofile(path) end
+end
+rawset(_G, "require", realRequire)
 
 -- ─── Test: Globals exist ────────────────────────────────────────────
 
@@ -167,6 +142,12 @@ assert_eq(type(OrvexBuilder), "table", "OrvexBuilder is a table")
 assert_eq(type(OrvexTransaction), "table", "OrvexTransaction is a table")
 assert_eq(type(OrvexMigration), "table", "OrvexMigration is a table")
 assert_eq(type(OrvexModelFactory), "table", "OrvexModelFactory is a table")
+for _, name in ipairs({
+    "OrvexModelHooks", "OrvexModelWrite", "OrvexModelInstance", "OrvexModelQuerying",
+    "OrvexModelCrud", "OrvexModelRelations", "OrvexModelNested",
+}) do
+    assert_eq(type(_G[name]), "table", name .. " is a table")
+end
 assert_eq(type(OrvexORM), "table", "OrvexORM is global")
 
 -- ─── Test: ORM works via globals ────────────────────────────────────
@@ -204,9 +185,9 @@ local sql, params = User.query()
     :limit(10)
     :toSQL()
 
-assert_match(sql, "job = %?", "where 2-arg works")
-assert_match(sql, "money > %?", "where 3-arg works")
-assert_match(sql, "ORDER BY money DESC", "orderBy works")
+assert_match(sql, "`job` = %?", "where 2-arg works")
+assert_match(sql, "`money` > %?", "where 3-arg works")
+assert_match(sql, "ORDER BY `money` DESC", "orderBy works")
 assert_match(sql, "LIMIT 10", "limit works")
 
 -- ─── Test: Transaction callback via globals ─────────────────────────
@@ -229,7 +210,7 @@ User.scope("rich", function(b)
 end)
 
 local scopeSQL = User.rich():toSQL()
-assert_match(scopeSQL, "money > %?", "scope as method works")
+assert_match(scopeSQL, "`money` > %?", "scope as method works")
 
 -- ─── Test: Inline opts via globals ──────────────────────────────────
 
@@ -253,7 +234,7 @@ InlineUser.create({ id = 1, name = "test" })
 assert_eq(hookFired, true, "inline hook works")
 
 local activeSQL = InlineUser.active():toSQL()
-assert_match(activeSQL, "name != %?", "inline scope works")
+assert_match(activeSQL, "`name` != %?", "inline scope works")
 
 -- ─── Test: Paginate via globals ─────────────────────────────────────
 
@@ -381,6 +362,17 @@ assert_eq(type(OrvexORM.debug), "function", "ORM.debug is a function via globals
 assert_eq(type(OrvexORM.enableCache), "function", "ORM.enableCache is a function via globals")
 assert_eq(type(OrvexORM.disableCache), "function", "ORM.disableCache is a function via globals")
 assert_eq(type(OrvexORM.unpack), "function", "ORM.unpack is a function via globals")
+
+-- ─── Test: Version and error positions in FiveM mode ─────────────────
+
+print("\n== Version and error positions in FiveM mode ==")
+
+assert_eq(OrvexORM.version, MANIFEST_VERSION, "ORM.version is the fxmanifest version")
+
+local ok, misuse = pcall(function() User.update({ money = 1 }, {}) end)
+assert_eq(ok, false, "update() without where raises")
+assert_eq(tostring(misuse):find("test_fivem_globals.lua:", 1, true) ~= nil, true,
+    "a misuse error points at the caller's line, not into the library")
 
 -- ─── Summary ────────────────────────────────────────────────────────
 
