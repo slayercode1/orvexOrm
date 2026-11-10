@@ -18,6 +18,7 @@
 ---@field private _count integer
 ---@field private _ttl number
 ---@field private _maxEntries integer
+---@field private _maxRows integer
 ---@field private _nextSweep number
 ---@field private _enabled boolean
 local Cache = {}
@@ -25,6 +26,7 @@ Cache.__index = Cache
 
 local DEFAULT_TTL         = 60
 local DEFAULT_MAX_ENTRIES = 1000
+local DEFAULT_MAX_ROWS    = 5000
 
 --- Index bucket for entries whose SQL names no recognisable table:
 --- any table invalidation purges them, so they can never go stale.
@@ -32,9 +34,26 @@ local ANY_TABLE = "\0*"
 
 local TABLE_KEYWORDS = { "from", "join", "into", "update" }
 
+--- A FROM followed by a comma before any parenthesis: an implicit join
+--- whose later tables the keyword scan cannot see. False positives
+--- (e.g. `LIMIT 10, 20`) only over-invalidate.
+local TABLE_LIST_PATTERN = "%f[%w_]from%s+[%w_$`%.]+[^,()]*,"
+
 local TYPE_TAGS = { string = "s", number = "n", boolean = "b" }
 
 -- ─── Keys ──────────────────────────────────────────────────────────
+
+--- Floats get their own tag and a round-trip exact text: `tostring`
+--- keeps only 14 significant digits, so distinct floats would collide.
+---@param value any
+---@return string|nil tag nil when the value cannot be serialised
+---@return string text
+local function encodeParam(value)
+    if math.type(value) == "float" then
+        return "f", ("%.17g"):format(value)
+    end
+    return TYPE_TAGS[type(value)], tostring(value)
+end
 
 ---@param sql string
 ---@param params any[]
@@ -44,10 +63,8 @@ local function describeParams(sql, params)
     local header = { tostring(#sql) }
     local values = {}
     for i = 1, #params do
-        local value = params[i]
-        local tag = TYPE_TAGS[type(value)]
+        local tag, text = encodeParam(params[i])
         if not tag then return nil, values end
-        local text = tostring(value)
         header[i + 1] = tag .. #text
         values[i] = text
     end
@@ -92,7 +109,9 @@ local function tablesReferencedBy(key)
             end
         end
     end
-    if #tables == 0 then tables[1] = ANY_TABLE end
+    if #tables == 0 or lowered:find(TABLE_LIST_PATTERN) then
+        tables[#tables + 1] = ANY_TABLE
+    end
     return tables
 end
 
@@ -103,20 +122,22 @@ local function normaliseTables(tables)
     if type(tables) == "string" then tables = { tables } end
     local normalised = {}
     for i, name in ipairs(tables) do
-        normalised[i] = name:lower()
+        normalised[i] = bareTableName(name:lower())
     end
     return normalised
 end
 
 -- ─── Construction ──────────────────────────────────────────────────
 
----@param opts? { ttl?: number, enabled?: boolean, maxEntries?: integer, sweepInterval?: number }
+--- `maxRows` bounds a single entry: a result with more rows is not cached.
+---@param opts? { ttl?: number, enabled?: boolean, maxEntries?: integer, maxRows?: integer, sweepInterval?: number }
 ---@return OrvexCache
 function Cache.new(opts)
     opts = opts or {}
     local self = setmetatable({}, Cache)
     self._ttl           = opts.ttl or DEFAULT_TTL
     self._maxEntries    = opts.maxEntries or DEFAULT_MAX_ENTRIES
+    self._maxRows       = opts.maxRows or DEFAULT_MAX_ROWS
     self._sweepInterval = opts.sweepInterval
     self._enabled       = opts.enabled ~= false
     self._hits          = 0
@@ -257,7 +278,8 @@ function Cache:get(key)
 end
 
 --- Tables are detected from the FROM/JOIN/INTO/UPDATE clauses of the key
---- when `tables` is omitted.
+--- when `tables` is omitted. A result over the `maxRows` budget is not
+--- cached, and drops any previous entry for the key.
 ---@param key string|nil nil (uncacheable query) is ignored
 ---@param value any
 ---@param ttl? number
@@ -268,6 +290,7 @@ function Cache:set(key, value, ttl, tables)
     local now = os.time()
     self:_sweepIfDue(now)
     self:_remove(key)
+    if type(value) == "table" and #value > self._maxRows then return end
 
     local entry = {
         key     = key,
@@ -299,10 +322,11 @@ function Cache:invalidatePrefix(prefix)
 end
 
 --- Purges entries reading `tableName` (exact name, JOINs and subqueries
---- included) and entries whose tables are unknown.
----@param tableName string
+--- included) and entries whose tables are unknown. A quoted or
+--- schema-qualified name matches its bare table, like the index.
+---@param tableName string e.g. users, `users`, db.users, `db`.`users`
 function Cache:invalidateTable(tableName)
-    self:_removeAll(self._byTable[tableName:lower()])
+    self:_removeAll(self._byTable[bareTableName(tableName:lower())])
     self:_removeAll(self._byTable[ANY_TABLE])
 end
 

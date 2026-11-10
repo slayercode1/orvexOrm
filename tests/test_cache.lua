@@ -48,6 +48,14 @@ check(Cache.makeKey(sql, { "license:abc", "police" }) == Cache.makeKey(sql, { "l
     "identical queries share a key")
 check(Cache.makeKey("SELECT 1", nil) == Cache.makeKey("SELECT 1", {}),
     "nil and empty params share a key")
+check(Cache.makeKey("q ?", { 100000000000001.0 }) ~= Cache.makeKey("q ?", { 100000000000002.0 }),
+    "floats equal to 14 significant digits produce different keys")
+check(Cache.makeKey("q ?", { 0.1 + 0.2 }) ~= Cache.makeKey("q ?", { 0.3 }),
+    "0.1 + 0.2 and 0.3 produce different keys")
+check(Cache.makeKey("q ?", { 1.0 }) ~= Cache.makeKey("q ?", { 1 }),
+    "float 1.0 and integer 1 produce different keys")
+check(Cache.makeKey("q ?", { 0.5 }) == Cache.makeKey("q ?", { 1 / 2 }),
+    "equal floats share a key")
 
 print("\n== Uncacheable parameters ==")
 
@@ -92,6 +100,27 @@ check(not isHit(byTable, "CALL opaque_procedure()"), "entry without known table 
 byTable:set("explicit", "e", nil, { "zones" })
 byTable:invalidateTable("zones")
 check(not isHit(byTable, "explicit"), "explicit table list is honoured")
+
+local qualifiedFind = Cache.makeKey("SELECT * FROM `gamedb`.`users` WHERE `id` = ? LIMIT 1", { 5 })
+byTable:set(qualifiedFind, "stale")
+byTable:invalidateTable("gamedb.users")
+check(not isHit(byTable, qualifiedFind), "write through a schema-qualified model purges its reads")
+byTable:set(qualifiedFind, "stale")
+byTable:invalidateTable("`GameDB`.`Users`")
+check(not isHit(byTable, qualifiedFind), "quoted, mixed-case qualified invalidation purges its reads")
+
+byTable:set("explicit qualified", "eq", nil, { "gamedb.zones" })
+byTable:invalidateTable("zones")
+check(not isHit(byTable, "explicit qualified"), "qualified explicit table list is indexed by bare name")
+
+local commaJoin = "SELECT p.* FROM players p, bans b WHERE b.pid = p.id"
+byTable:set(commaJoin, "cj")
+byTable:invalidateTable("bans")
+check(not isHit(byTable, commaJoin), "comma-joined table purged")
+local commaSubquery = "SELECT * FROM players WHERE id NOT IN (SELECT p.id FROM players p, bans b WHERE b.pid = p.id)"
+byTable:set(commaSubquery, "cs")
+byTable:invalidateTable("bans")
+check(not isHit(byTable, commaSubquery), "comma-joined table inside a subquery purged")
 
 local before = byTable:size()
 byTable:invalidateTable("unknown_table")
@@ -145,6 +174,27 @@ check(not isHit(prefixed, "SELECT * FROM users_logs:1") and prefixed:size() == 1
 counted:set("z", 1)
 counted:flush()
 check(counted:size() == 0 and not isHit(counted, "z"), "flush resets everything")
+
+print("\n== Per-entry row budget ==")
+
+local budget = Cache.new({ ttl = 60, enabled = true, maxRows = 2 })
+budget:set("small", { 1, 2 })
+budget:set("large", { 1, 2, 3 })
+budget:set("scalar", 42)
+check(isHit(budget, "small"), "result within the row budget is cached")
+check(not isHit(budget, "large") and budget:size() == 2, "result over the row budget is not cached")
+check(isHit(budget, "scalar"), "non-table result is cached")
+budget:set("small", { 1, 2, 3 })
+check(not isHit(budget, "small"), "oversized result replaces, never keeps, the previous entry")
+
+local defaultBudget = Cache.new({ ttl = 60, enabled = true })
+local rows = {}
+for i = 1, 5001 do rows[i] = i end
+defaultBudget:set("huge", rows)
+check(not isHit(defaultBudget, "huge"), "default row budget is 5000")
+rows[5001] = nil
+defaultBudget:set("huge", rows)
+check(isHit(defaultBudget, "huge"), "5000 rows fit the default budget")
 
 print("\n== Expired entries are purged ==")
 
