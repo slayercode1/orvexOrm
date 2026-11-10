@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>OrvexORM Studio</title>
-<style>
+<style nonce="{{NONCE}}">
 /* ─── Tokens ─────────────────────────────────────────────────────── */
 :root {
     --bg: #0b0c0e;
@@ -405,6 +405,10 @@ table.grid { width: 100%; border-collapse: collapse; }
 .form-group input:focus, .form-group select:focus, .form-group textarea:focus { border-color: var(--accent); }
 .form-group textarea { min-height: 84px; resize: vertical; font-family: var(--font-mono); font-size: 12px; line-height: 1.6; }
 .form-group input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); }
+.filter-bar .filter-value { width: 180px; }
+.btn.btn-compact { padding: 2px 8px; }
+.grid th.actions-head { cursor: default; }
+[hidden] { display: none !important; }
 .form-group .auto-tag { display: inline-block; color: var(--accent); font-size: 11px; font-weight: 600; letter-spacing: 0.04em; padding: 3px 0; }
 
 /* ─── Toast ──────────────────────────────────────────────────────── */
@@ -479,7 +483,7 @@ table.grid { width: 100%; border-collapse: collapse; }
 <body>
 
 <header class="header">
-    <button class="menu-toggle" id="menuToggle" aria-label="Toggle table list" onclick="toggleSidebar()">
+    <button class="menu-toggle" id="menuToggle" aria-label="Toggle table list" data-action="toggle-sidebar">
         <span class="icon"><svg viewBox="0 0 24 24"><line x1="3" y1="7" x2="21" y2="7"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="17" x2="21" y2="17"/></svg></span>
     </button>
     <div class="logo">
@@ -490,10 +494,10 @@ table.grid { width: 100%; border-collapse: collapse; }
 </header>
 
 <div class="layout">
-    <div class="sidebar-backdrop" id="sidebarBackdrop" onclick="toggleSidebar()"></div>
+    <div class="sidebar-backdrop" id="sidebarBackdrop" data-action="toggle-sidebar"></div>
     <nav class="sidebar" id="sidebar" aria-label="Tables">
         <div class="sidebar-search">
-            <input type="text" id="tableSearch" placeholder="Filter tables…" oninput="filterTables()" aria-label="Filter tables">
+            <input type="text" id="tableSearch" placeholder="Filter tables…" aria-label="Filter tables">
         </div>
         <div class="sidebar-label">Tables</div>
         <div class="table-list" id="tableList" role="list"></div>
@@ -507,14 +511,19 @@ table.grid { width: 100%; border-collapse: collapse; }
     </main>
 </div>
 
-<script>
+<script nonce="{{NONCE}}">
+(() => {
+'use strict';
+
+// The token travels in the initial URL only; it is moved into this closure
+// and removed from the address bar, then sent as the X-Studio-Token header.
 const TOKEN = new URLSearchParams(location.search).get('token') || '';
 const BASE = location.pathname.replace(/\/$/, '');
 if (TOKEN) history.replaceState(null, '', location.pathname);
 let currentTable = null, currentSchema = null, currentPK = null;
 let currentPage = 1, currentPerPage = 25, currentSort = null, currentDir = 'asc';
 let currentLastPage = 1;
-let allTables = [], currentRows = [], currentTab = 'data';
+let allTables = [], currentRows = [];
 
 class ApiError extends Error {
     constructor(error, status) {
@@ -556,9 +565,43 @@ async function api(p, o = {}, attempt = 0) {
     }
 }
 
-function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+/* ─── DOM helpers ───────────────────────────────────────────────── */
+
+const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+
+// Safe in text and in quoted attribute contexts.
+function esc(s) {
+    return String(s).replace(/[&<>"']/g, ch => HTML_ESCAPES[ch]);
+}
+
+// Builds an element without parsing HTML: values land in properties
+// (value, checked, dataset…) so row data can never become markup.
+function h(tag, props = {}, ...children) {
+    const node = document.createElement(tag);
+    for (const [key, value] of Object.entries(props)) {
+        if (value === undefined || value === null) continue;
+        if (key === 'dataset') Object.assign(node.dataset, value);
+        else if (key in node) node[key] = value;
+        else node.setAttribute(key, String(value));
+    }
+    node.append(...children.flat().filter(child => child !== null && child !== undefined && child !== false));
+    return node;
+}
+
+// For trusted, static SVG icons only.
+function icon(markup, className = 'icon') {
+    const wrapper = h('span', { className });
+    wrapper.innerHTML = markup;
+    return wrapper;
+}
 
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+
+const ICONS = {
+    success: '<svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>',
+    error: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>',
+    close: '<svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
+};
 
 /* ─── Toast ─────────────────────────────────────────────────────── */
 
@@ -566,13 +609,9 @@ const visibleToasts = new Map();
 
 function toast(msg, type = 'success', dedupeKey = `${type}:${msg}`) {
     if (visibleToasts.has(dedupeKey)) return;
-    const ic = type === 'success'
-        ? '<svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>'
-        : '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>';
-    const el = document.createElement('div');
-    el.className = 'toast ' + type;
-    el.setAttribute('role', 'status');
-    el.innerHTML = ic + esc(msg);
+    const el = h('div', { className: 'toast ' + type, role: 'status' });
+    el.innerHTML = ICONS[type] || ICONS.error;
+    el.append(String(msg));
     document.body.appendChild(el);
     visibleToasts.set(dedupeKey, el);
     const duration = type === 'error' ? 6000 : 2800;
@@ -604,34 +643,33 @@ async function loadTables() {
 
 function renderTables(tables) {
     const list = document.getElementById('tableList');
-    list.innerHTML = '';
+    list.replaceChildren();
     if (!tables.length) {
-        list.innerHTML = '<div class="sidebar-empty">No matching table.</div>';
+        list.append(h('div', { className: 'sidebar-empty' }, 'No matching table.'));
         return;
     }
     tables.forEach(t => {
-        const el = document.createElement('button');
-        el.className = 'table-item' + (t === currentTable ? ' active' : '');
-        el.setAttribute('role', 'listitem');
-        el.innerHTML = '<span class="t-name">' + esc(t) + '</span><span class="t-count">·</span>';
-        el.onclick = () => { selectTable(t); closeSidebarMobile(); };
+        const count = h('span', { className: 't-count' }, '·');
+        const el = h('button', { className: 'table-item' + (t === currentTable ? ' active' : ''), role: 'listitem' },
+            h('span', { className: 't-name' }, String(t)), count);
+        el.addEventListener('click', () => { selectTable(t); closeSidebarMobile(); });
         list.appendChild(el);
         api('/api/tables/' + encodeURIComponent(t) + '/count').then(d => {
-            el.querySelector('.t-count').textContent = d.count ?? '·';
+            count.textContent = d.count ?? '·';
         }).catch(() => {});
     });
 }
 
 function filterTables() {
     const q = document.getElementById('tableSearch').value.toLowerCase();
-    renderTables(allTables.filter(t => t.toLowerCase().includes(q)));
+    renderTables(allTables.filter(t => String(t).toLowerCase().includes(q)));
 }
 
 /* ─── Table selection / layout ──────────────────────────────────── */
 
 async function selectTable(name) {
     try {
-        currentTable = name; currentPage = 1; currentSort = null; currentTab = 'data';
+        currentTable = name; currentPage = 1; currentSort = null;
         filterTables();
         const sd = await api('/api/tables/' + encodeURIComponent(name) + '/schema');
         currentSchema = sd.schema || [];
@@ -651,12 +689,12 @@ function renderMainArea() {
                 <div>
                     <div class="page-title">${esc(currentTable)}</div>
                     <div class="tabs" role="tablist">
-                        <button class="tab active" id="tabData" role="tab" aria-selected="true" onclick="showTab('data', this)">Data</button>
-                        <button class="tab" id="tabSchema" role="tab" aria-selected="false" onclick="showTab('schema', this)">Schema</button>
+                        <button class="tab active" id="tabData" role="tab" aria-selected="true" data-action="show-tab" data-tab="data">Data</button>
+                        <button class="tab" id="tabSchema" role="tab" aria-selected="false" data-action="show-tab" data-tab="schema">Schema</button>
                     </div>
                 </div>
                 <div class="spacer"></div>
-                <button class="btn btn-primary" onclick="openAddModal()">
+                <button class="btn btn-primary" data-action="add-row">
                     <span class="icon"><svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></span>
                     Add row
                 </button>
@@ -666,21 +704,17 @@ function renderMainArea() {
         <div class="filter-bar" id="filterBar">
             <select id="filterCol" aria-label="Filter column"><option value="">Filter by…</option></select>
             <select id="filterOp" aria-label="Filter operator"><option value="=">=</option><option value="!=">&ne;</option><option value=">">&gt;</option><option value="<">&lt;</option><option value=">=">&ge;</option><option value="<=">&le;</option><option value="LIKE">contains</option><option value="IS NULL">is null</option><option value="IS NOT NULL">is not null</option></select>
-            <input type="text" id="filterVal" placeholder="Value…" style="width:180px" aria-label="Filter value" onkeydown="if(event.key==='Enter')applyFilter()">
-            <button class="btn btn-ghost" onclick="applyFilter()">Apply</button>
+            <input type="text" id="filterVal" class="filter-value" placeholder="Value…" aria-label="Filter value">
+            <button class="btn btn-ghost" data-action="apply-filter">Apply</button>
             <span class="f-active" id="filterActive">
                 <span>filtered</span>
-                <button class="btn btn-ghost" style="padding:2px 8px" onclick="clearFilter()">Clear</button>
+                <button class="btn btn-ghost btn-compact" data-action="clear-filter">Clear</button>
             </span>
         </div>
         <div class="grid-wrapper" id="gridWrapper"></div>
         <div class="pagination" id="pagination"></div>`;
     const sel = document.getElementById('filterCol');
-    currentSchema.forEach(c => {
-        const o = document.createElement('option');
-        o.value = c.Field; o.textContent = c.Field;
-        sel.appendChild(o);
-    });
+    currentSchema.forEach(c => sel.appendChild(h('option', { value: c.Field }, String(c.Field))));
     renderSkeleton();
 }
 
@@ -688,17 +722,17 @@ function renderMainArea() {
 
 function renderSkeleton() {
     const cols = Math.min(6, Math.max(3, (currentSchema || []).length));
-    let h = '<table class="grid" aria-hidden="true"><tbody>';
+    const body = h('tbody');
     for (let r = 0; r < 8; r++) {
-        h += '<tr class="skel-row">';
+        const row = h('tr', { className: 'skel-row' });
         for (let c = 0; c < cols; c++) {
-            const w = 40 + ((r * 7 + c * 13) % 60);
-            h += '<td><span class="skel" style="width:' + w + 'px"></span></td>';
+            const bar = h('span', { className: 'skel' });
+            bar.style.width = (40 + ((r * 7 + c * 13) % 60)) + 'px';
+            row.append(h('td', {}, bar));
         }
-        h += '</tr>';
+        body.append(row);
     }
-    h += '</tbody></table>';
-    document.getElementById('gridWrapper').innerHTML = h;
+    document.getElementById('gridWrapper').replaceChildren(h('table', { className: 'grid', 'aria-hidden': 'true' }, body));
 }
 
 async function loadRows() {
@@ -727,27 +761,27 @@ function renderGrid(rows, total) {
         return;
     }
     const cols = currentSchema.map(c => c.Field);
-    let h = '<table class="grid"><thead><tr>';
-    cols.forEach(c => {
+    let html = '<table class="grid"><thead><tr>';
+    cols.forEach((c, index) => {
         const sorted = currentSort === c;
         const ind = sorted ? (currentDir === 'asc' ? '▲' : '▼') : '';
         const ariaSort = sorted ? (currentDir === 'asc' ? 'ascending' : 'descending') : 'none';
-        h += '<th class="' + (sorted ? 'sorted' : '') + '" aria-sort="' + ariaSort + '"><button onclick="sortBy(\'' + esc(c) + '\')">' + esc(c) + '<span class="sort-ind">' + ind + '</span></button></th>';
+        html += '<th class="' + (sorted ? 'sorted' : '') + '" aria-sort="' + ariaSort + '"><button data-action="sort" data-col-index="' + index + '">' + esc(c) + '<span class="sort-ind">' + ind + '</span></button></th>';
     });
-    h += '<th style="cursor:default" aria-hidden="true"></th></tr></thead><tbody class="fade-in">';
+    html += '<th class="actions-head" aria-hidden="true"></th></tr></thead><tbody class="fade-in">';
     rows.forEach((row, idx) => {
-        h += '<tr>';
+        html += '<tr>';
         cols.forEach(c => {
             const v = row[c];
-            if (v === null || v === undefined) h += '<td><span class="null-val">null</span></td>';
-            else if (typeof v === 'object') h += '<td><span class="json-val">' + esc(JSON.stringify(v)) + '</span></td>';
-            else h += '<td>' + esc(String(v)) + '</td>';
+            if (v === null || v === undefined) html += '<td><span class="null-val">null</span></td>';
+            else if (typeof v === 'object') html += '<td><span class="json-val">' + esc(JSON.stringify(v)) + '</span></td>';
+            else html += '<td>' + esc(v) + '</td>';
         });
-        h += '<td class="row-actions"><button class="action-btn" aria-label="Edit row" onclick="openEditModal(currentRows[' + idx + '])"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg></button><button class="action-btn" aria-label="Delete row" onclick="confirmDelete(currentRows[' + idx + '])"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button></td>';
-        h += '</tr>';
+        html += '<td class="row-actions"><button class="action-btn" aria-label="Edit row" data-action="edit-row" data-row-index="' + idx + '"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg></button><button class="action-btn" aria-label="Delete row" data-action="delete-row" data-row-index="' + idx + '"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button></td>';
+        html += '</tr>';
     });
-    h += '</tbody></table>';
-    w.innerHTML = h;
+    html += '</tbody></table>';
+    w.innerHTML = html;
     renderPagination(total);
     const fa = document.getElementById('filterActive');
     const fc = document.getElementById('filterCol');
@@ -757,10 +791,10 @@ function renderGrid(rows, total) {
 function renderPagination(total) {
     const lp = Math.max(1, Math.ceil(total / currentPerPage));
     currentLastPage = lp;
-    let h = '<div class="info"><span>' + total + ' row' + (total === 1 ? '' : 's') + '</span><select onchange="changePerPage(this.value)" aria-label="Rows per page">';
-    [10, 25, 50, 100].forEach(n => { h += '<option value="' + n + '"' + (n === currentPerPage ? ' selected' : '') + '>' + n + ' / page</option>'; });
-    h += '</select></div><div class="pages">';
-    h += '<button class="page-btn' + (currentPage <= 1 ? ' disabled' : '') + '" aria-label="Previous page" onclick="goPage(' + (currentPage - 1) + ')"' + (currentPage <= 1 ? ' disabled' : '') + '><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>';
+    let html = '<div class="info"><span>' + Number(total) + ' row' + (total === 1 ? '' : 's') + '</span><select data-action="per-page" aria-label="Rows per page">';
+    [10, 25, 50, 100].forEach(n => { html += '<option value="' + n + '"' + (n === currentPerPage ? ' selected' : '') + '>' + n + ' / page</option>'; });
+    html += '</select></div><div class="pages">';
+    html += '<button class="page-btn' + (currentPage <= 1 ? ' disabled' : '') + '" aria-label="Previous page" data-action="go-page" data-page="' + (currentPage - 1) + '"' + (currentPage <= 1 ? ' disabled' : '') + '><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>';
     const range = [];
     if (lp <= 7) for (let i = 1; i <= lp; i++) range.push(i);
     else {
@@ -771,12 +805,12 @@ function renderPagination(total) {
         range.push(lp);
     }
     range.forEach(p => {
-        if (p === '…') h += '<span class="page-dots">…</span>';
-        else h += '<button class="page-btn' + (p === currentPage ? ' active' : '') + '" onclick="goPage(' + p + ')">' + p + '</button>';
+        if (p === '…') html += '<span class="page-dots">…</span>';
+        else html += '<button class="page-btn' + (p === currentPage ? ' active' : '') + '" data-action="go-page" data-page="' + p + '">' + p + '</button>';
     });
-    h += '<button class="page-btn' + (currentPage >= lp ? ' disabled' : '') + '" aria-label="Next page" onclick="goPage(' + (currentPage + 1) + ')"' + (currentPage >= lp ? ' disabled' : '') + '><svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg></button>';
-    h += '</div>';
-    document.getElementById('pagination').innerHTML = h;
+    html += '<button class="page-btn' + (currentPage >= lp ? ' disabled' : '') + '" aria-label="Next page" data-action="go-page" data-page="' + (currentPage + 1) + '"' + (currentPage >= lp ? ' disabled' : '') + '><svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg></button>';
+    html += '</div>';
+    document.getElementById('pagination').innerHTML = html;
 }
 
 function sortBy(c) {
@@ -785,7 +819,7 @@ function sortBy(c) {
     loadRows();
 }
 function goPage(p) { if (p < 1 || p > currentLastPage) return; currentPage = p; loadRows(); }
-function changePerPage(v) { currentPerPage = parseInt(v); currentPage = 1; loadRows(); }
+function changePerPage(v) { currentPerPage = parseInt(v, 10); currentPage = 1; loadRows(); }
 function applyFilter() { currentPage = 1; loadRows(); }
 function clearFilter() {
     document.getElementById('filterCol').value = '';
@@ -797,24 +831,23 @@ function clearFilter() {
 /* ─── Tabs ──────────────────────────────────────────────────────── */
 
 function showTab(tab, btn) {
-    currentTab = tab;
     document.querySelectorAll('.tab').forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
     btn.classList.add('active');
     btn.setAttribute('aria-selected', 'true');
-    document.getElementById('filterBar').style.display = tab === 'schema' ? 'none' : '';
+    document.getElementById('filterBar').hidden = tab === 'schema';
     if (tab === 'schema') {
         const w = document.getElementById('gridWrapper');
-        let h = '<div class="schema-view"><table><thead><tr><th>Column</th><th>Type</th><th>Nullable</th><th>Key</th><th>Default</th><th>Extra</th></tr></thead><tbody>';
+        let html = '<div class="schema-view"><table><thead><tr><th>Column</th><th>Type</th><th>Nullable</th><th>Key</th><th>Default</th><th>Extra</th></tr></thead><tbody>';
         currentSchema.forEach(c => {
-            h += '<tr><td>' + esc(c.Field) + '</td>'
+            html += '<tr><td>' + esc(c.Field) + '</td>'
                 + '<td><span class="type-badge">' + esc(c.Type) + '</span></td>'
                 + '<td>' + esc(c.Null || '') + '</td>'
                 + '<td>' + (c.Key === 'PRI' ? '<span class="pk-badge">PRIMARY</span>' : esc(c.Key || '')) + '</td>'
-                + '<td>' + (c.Default === null ? '<span class="null-val">null</span>' : esc(String(c.Default))) + '</td>'
+                + '<td>' + (c.Default === null ? '<span class="null-val">null</span>' : esc(c.Default)) + '</td>'
                 + '<td>' + esc(c.Extra || '') + '</td></tr>';
         });
-        h += '</tbody></table></div>';
-        w.innerHTML = h;
+        html += '</tbody></table></div>';
+        w.innerHTML = html;
         document.getElementById('pagination').innerHTML = '';
     } else {
         loadRows();
@@ -839,32 +872,43 @@ function getEnumValues(t) {
     return m[1].split(',').map(v => v.trim().replace(/^'|'$/g, ''));
 }
 
+function fieldValue(column, row) {
+    if (!row) return column.Default || '';
+    return row[column.Field] != null ? row[column.Field] : '';
+}
+
+function buildInput(column, value, inputId) {
+    const common = { id: inputId, dataset: { col: column.Field } };
+    switch (getInputType(column.Type)) {
+        case 'checkbox':
+            return h('input', { ...common, type: 'checkbox', checked: value == 1 });
+        case 'textarea':
+            return h('textarea', { ...common, spellcheck: false, value: typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value) });
+        case 'enum':
+            return h('select', common, getEnumValues(column.Type).map(v => h('option', { value: v, selected: v === String(value) }, v)));
+        default:
+            return h('input', { ...common, type: getInputType(column.Type), value: String(value) });
+    }
+}
+
+function buildField(column, row) {
+    const inputId = 'field-' + String(column.Field).replace(/[^a-zA-Z0-9_-]/g, '-');
+    const isAutoIncrement = Boolean(column.Extra && column.Extra.includes('auto_increment'));
+    const control = isAutoIncrement && !row
+        ? h('div', {}, h('span', { className: 'auto-tag' }, 'auto increment'))
+        : buildInput(column, fieldValue(column, row), inputId);
+    return h('div', { className: 'form-group' },
+        h('label', { htmlFor: inputId }, String(column.Field) + ' ', h('span', { className: 'type-hint' }, String(column.Type))),
+        control);
+}
+
 function buildForm(row) {
-    let h = '';
-    currentSchema.forEach(c => {
-        const it = getInputType(c.Type);
-        const val = row ? (row[c.Field] != null ? row[c.Field] : '') : (c.Default || '');
-        const isAuto = c.Extra && c.Extra.includes('auto_increment');
-        const inputId = 'field-' + c.Field.replace(/[^a-zA-Z0-9_-]/g, '-');
-        h += '<div class="form-group"><label for="' + esc(inputId) + '">' + esc(c.Field) + ' <span class="type-hint">' + esc(c.Type) + '</span></label>';
-        if (isAuto && !row) h += '<div><span class="auto-tag">auto increment</span></div>';
-        else if (it === 'checkbox') h += '<input id="' + esc(inputId) + '" type="checkbox" data-col="' + esc(c.Field) + '"' + (val == 1 ? ' checked' : '') + '>';
-        else if (it === 'textarea') {
-            const d = typeof val === 'object' ? JSON.stringify(val, null, 2) : val;
-            h += '<textarea id="' + esc(inputId) + '" data-col="' + esc(c.Field) + '" spellcheck="false">' + esc(String(d)) + '</textarea>';
-        } else if (it === 'enum') {
-            h += '<select id="' + esc(inputId) + '" data-col="' + esc(c.Field) + '">';
-            getEnumValues(c.Type).forEach(v => { h += '<option value="' + esc(v) + '"' + (v === String(val) ? ' selected' : '') + '>' + esc(v) + '</option>'; });
-            h += '</select>';
-        } else h += '<input id="' + esc(inputId) + '" type="' + it + '" data-col="' + esc(c.Field) + '" value="' + esc(String(val)) + '">';
-        h += '</div>';
-    });
-    return h;
+    return currentSchema.map(column => buildField(column, row));
 }
 
 function collectFormData() {
     const d = {};
-    document.querySelectorAll('[data-col]').forEach(el => {
+    document.querySelectorAll('.modal [data-col]').forEach(el => {
         const c = el.dataset.col;
         if (el.type === 'checkbox') d[c] = el.checked ? 1 : 0;
         else if (el.value !== '') d[c] = el.value;
@@ -876,15 +920,23 @@ function collectFormData() {
 
 let modalTrigger = null;
 
-function openModal(title, body, footer, narrow) {
+function modalButton(label, className, action) {
+    return h('button', { className, dataset: { action } }, label);
+}
+
+function tableTitle(prefix) {
+    return [prefix + ' ', h('span', { className: 'mono' }, String(currentTable))];
+}
+
+function openModal({ title, body, footer, narrow = false }) {
     modalTrigger = document.activeElement;
-    document.body.insertAdjacentHTML('beforeend',
-        '<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal' + (narrow ? ' narrow' : '') + '" role="dialog" aria-modal="true" aria-labelledby="modal-title">'
-        + '<div class="modal-header"><h2 id="modal-title">' + title + '</h2>'
-        + '<button class="modal-close" aria-label="Close" onclick="closeModal()"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>'
-        + '<div class="modal-body">' + body + '</div>'
-        + '<div class="modal-footer">' + footer + '</div>'
-        + '</div></div>');
+    const closeButton = h('button', { className: 'modal-close', 'aria-label': 'Close', dataset: { action: 'close-modal' } });
+    closeButton.innerHTML = ICONS.close;
+    const dialog = h('div', { className: 'modal' + (narrow ? ' narrow' : ''), role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'modal-title' },
+        h('div', { className: 'modal-header' }, h('h2', { id: 'modal-title' }, title), closeButton),
+        h('div', { className: 'modal-body' }, body),
+        h('div', { className: 'modal-footer' }, footer));
+    document.body.appendChild(h('div', { className: 'modal-overlay' }, dialog));
     const first = document.querySelector('.modal-body input:not([type=checkbox]), .modal-body textarea, .modal-body select');
     if (first) first.focus();
 }
@@ -892,13 +944,19 @@ function openModal(title, body, footer, narrow) {
 let editingRow = null;
 function openAddModal() {
     editingRow = null;
-    openModal('Add row <span class="mono">' + esc(currentTable) + '</span>', buildForm(null),
-        '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="submitAdd()">Insert row</button>');
+    openModal({
+        title: tableTitle('Add row'),
+        body: buildForm(null),
+        footer: [modalButton('Cancel', 'btn btn-ghost', 'close-modal'), modalButton('Insert row', 'btn btn-primary', 'submit-add')],
+    });
 }
 function openEditModal(row) {
     editingRow = row;
-    openModal('Edit row <span class="mono">' + esc(currentTable) + '</span>', buildForm(row),
-        '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="submitEditCurrent()">Save changes</button>');
+    openModal({
+        title: tableTitle('Edit row'),
+        body: buildForm(row),
+        footer: [modalButton('Cancel', 'btn btn-ghost', 'close-modal'), modalButton('Save changes', 'btn btn-primary', 'submit-edit')],
+    });
 }
 function closeModal() {
     const o = document.querySelector('.modal-overlay');
@@ -912,9 +970,15 @@ let pendingDelete = null;
 function confirmDelete(row) {
     if (!currentPK) { toast('This table has no primary key', 'error'); return; }
     pendingDelete = row;
-    openModal('Delete row',
-        '<div class="confirm-text">This permanently removes the row where <strong>' + esc(currentPK) + ' = ' + esc(String(row[currentPK])) + '</strong>. This cannot be undone.</div>',
-        '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn-danger-solid" onclick="executeDelete()">Delete row</button>', true);
+    openModal({
+        title: 'Delete row',
+        body: h('div', { className: 'confirm-text' },
+            'This permanently removes the row where ',
+            h('strong', {}, String(currentPK) + ' = ' + String(row[currentPK])),
+            '. This cannot be undone.'),
+        footer: [modalButton('Cancel', 'btn btn-ghost', 'close-modal'), modalButton('Delete row', 'btn-danger-solid', 'execute-delete')],
+        narrow: true,
+    });
 }
 async function executeDelete() {
     const row = pendingDelete;
@@ -922,7 +986,7 @@ async function executeDelete() {
     closeModal();
     if (!row) return;
     try {
-        const r = await api('/api/tables/' + encodeURIComponent(currentTable) + '/rows', { method: 'DELETE', body: JSON.stringify({ pk: currentPK, pkValue: row[currentPK] }) });
+        await api('/api/tables/' + encodeURIComponent(currentTable) + '/rows', { method: 'DELETE', body: JSON.stringify({ pk: currentPK, pkValue: row[currentPK] }) });
         toast('Row deleted');
         loadRows();
     } catch (e) { /* api() already reports a safe, deduplicated error. */ }
@@ -931,7 +995,7 @@ async function executeDelete() {
 async function submitAdd() {
     const d = collectFormData();
     try {
-        const r = await api('/api/tables/' + encodeURIComponent(currentTable) + '/rows', { method: 'POST', body: JSON.stringify(d) });
+        await api('/api/tables/' + encodeURIComponent(currentTable) + '/rows', { method: 'POST', body: JSON.stringify(d) });
         toast('Row inserted');
         closeModal();
         loadRows();
@@ -942,14 +1006,48 @@ async function submitEditCurrent() {
     if (!editingRow || !currentPK) return;
     const d = collectFormData();
     try {
-        const r = await api('/api/tables/' + encodeURIComponent(currentTable) + '/rows', { method: 'PUT', body: JSON.stringify({ pk: currentPK, pkValue: editingRow[currentPK], data: d }) });
+        await api('/api/tables/' + encodeURIComponent(currentTable) + '/rows', { method: 'PUT', body: JSON.stringify({ pk: currentPK, pkValue: editingRow[currentPK], data: d }) });
         toast('Row updated');
         closeModal();
         loadRows();
     } catch (e) { /* api() already reports a safe, deduplicated error. */ }
 }
 
+/* ─── Event wiring (no inline handlers: CSP forbids them) ───────── */
+
+const rowAt = el => currentRows[Number(el.dataset.rowIndex)];
+
+const CLICK_ACTIONS = {
+    'toggle-sidebar': () => toggleSidebar(),
+    'show-tab': el => showTab(el.dataset.tab, el),
+    'add-row': () => openAddModal(),
+    'apply-filter': () => applyFilter(),
+    'clear-filter': () => clearFilter(),
+    'sort': el => sortBy(currentSchema[Number(el.dataset.colIndex)].Field),
+    'edit-row': el => openEditModal(rowAt(el)),
+    'delete-row': el => confirmDelete(rowAt(el)),
+    'go-page': el => goPage(Number(el.dataset.page)),
+    'close-modal': () => closeModal(),
+    'submit-add': () => submitAdd(),
+    'submit-edit': () => submitEditCurrent(),
+    'execute-delete': () => executeDelete(),
+};
+
+document.addEventListener('click', e => {
+    if (e.target.classList && e.target.classList.contains('modal-overlay')) { closeModal(); return; }
+    const el = e.target.closest('[data-action]');
+    const handler = el && CLICK_ACTIONS[el.dataset.action];
+    if (handler && !el.disabled) handler(el, e);
+});
+
+document.addEventListener('change', e => {
+    if (e.target.dataset && e.target.dataset.action === 'per-page') changePerPage(e.target.value);
+});
+
+document.getElementById('tableSearch').addEventListener('input', debounce(filterTables, 80));
+
 document.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && e.target.id === 'filterVal') { applyFilter(); return; }
     const modal = document.querySelector('.modal');
     if (!modal) return;
     if (e.key === 'Escape') { closeModal(); return; }
@@ -960,7 +1058,9 @@ document.addEventListener('keydown', e => {
     if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
 });
+
 loadTables();
+})();
 </script>
 </body>
 </html>

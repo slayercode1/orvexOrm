@@ -68,18 +68,40 @@ local function configuredToken()
     return nil
 end
 
+local function toHex(bytes)
+    return (bytes:gsub(".", function(byte) return ("%02x"):format(byte:byte()) end))
+end
+
+---@param byteCount integer
+---@return string|nil hex nil when the system random source is unavailable
+local function secureRandomHex(byteCount)
+    local source = io.open("/dev/urandom", "rb")
+    if not source then return nil end
+    local bytes = source:read(byteCount)
+    source:close()
+    if not bytes or #bytes ~= byteCount then return nil end
+    return toHex(bytes)
+end
+
 local function generateToken()
     local provided = configuredToken()
     if provided then return provided end
 
-    local source = io.open("/dev/urandom", "rb")
-    if not source then
+    local token = secureRandomHex(32)
+    if not token then
         return nil, "Secure randomness is unavailable. Set orvex_studio_token to at least 32 random characters."
     end
-    local bytes = source:read(32)
-    source:close()
-    if not bytes or #bytes ~= 32 then return nil, "Secure token generation failed." end
-    return (bytes:gsub(".", function(byte) return ("%02x"):format(byte:byte()) end))
+    return token
+end
+
+-- A CSP nonce only has to be unguessable by content stored in the database,
+-- so a math.random fallback keeps Windows hosts (no /dev/urandom) working.
+local function generateNonce()
+    local nonce = secureRandomHex(16)
+    if nonce then return nonce end
+    local bytes = {}
+    for index = 1, 16 do bytes[index] = string.char(math.random(0, 255)) end
+    return toHex(table.concat(bytes))
 end
 
 local function constantTimeEquals(left, right)
@@ -92,50 +114,158 @@ local function constantTimeEquals(left, right)
     return difference == 0
 end
 
+---@param address string
+---@return boolean exceeded
+---@return boolean firstRejection true only for the first rejection of the window, so it is logged once
 local function exceedsRequestLimit(address)
     local now = os.time()
     local window = requestWindows[address]
     if not window or now - window.startedAt >= REQUEST_WINDOW_SECONDS then
         boundedSet(requestWindows, address, { startedAt = now, count = 1 })
-        return false
+        return false, false
     end
     window.count = window.count + 1
-    return window.count > MAX_REQUESTS_PER_WINDOW
+    return window.count > MAX_REQUESTS_PER_WINDOW, window.count == MAX_REQUESTS_PER_WINDOW + 1
+end
+
+---@param address string
+---@return boolean firstRejection true the first time a locked-out address is rejected
+local function claimLockoutReport(address)
+    local entry = failedAttempts[address]
+    if not entry or entry.lockoutReported then return false end
+    entry.lockoutReported = true
+    return true
+end
+
+-- ─── Network allowlist ─────────────────────────────────────────────
+-- Convar orvex_studio_allow: addresses or IPv4 CIDR ranges separated by
+-- commas or spaces, "*" for any address. Loopback only by default.
+
+local DEFAULT_ALLOWED_ADDRESSES = "127.0.0.1, ::1"
+
+---@type { any: boolean|nil, exact: string|nil, network: integer|nil, mask: integer|nil }[]
+local allowedAddresses = {}
+
+---@param address string|nil "ip:port", "[ipv6]:port", "::ffff:ipv4:port" or a bare IP
+---@return string host lower-case host without port, IPv4-mapped prefix removed
+local function hostFromAddress(address)
+    if type(address) ~= "string" or address == "" then return "unknown" end
+    local host = address:match("^%[(.-)%]")
+        or address:match("^(.*%d+%.%d+%.%d+%.%d+):%d+$")
+        or address
+    return (host:lower():gsub("^::ffff:", ""))
+end
+
+---@return integer|nil
+local function ipv4ToInteger(text)
+    local a, b, c, d = text:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+    if not a then return nil end
+    local value = 0
+    for _, octet in ipairs({ tonumber(a), tonumber(b), tonumber(c), tonumber(d) }) do
+        if octet > 255 then return nil end
+        value = value * 256 + octet
+    end
+    return value
+end
+
+local function parseAllowEntry(entry)
+    if entry == "*" then return { any = true } end
+    local base, bits = entry:match("^([%d%.]+)/(%d+)$")
+    if base then
+        local network, prefix = ipv4ToInteger(base), tonumber(bits)
+        if not network or prefix > 32 then return nil end
+        local mask = prefix == 0 and 0 or ((0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF)
+        return { network = network & mask, mask = mask }
+    end
+    if entry:match("^[%x%.:]+$") then return { exact = hostFromAddress(entry) } end
+    return nil
+end
+
+local function loadAllowList()
+    local spec = type(GetConvar) == "function" and GetConvar("orvex_studio_allow", DEFAULT_ALLOWED_ADDRESSES) or DEFAULT_ALLOWED_ADDRESSES
+    if spec:match("^%s*$") then spec = DEFAULT_ALLOWED_ADDRESSES end
+    local entries, labels = {}, {}
+    for token in spec:gmatch("[^,%s]+") do
+        local entry = parseAllowEntry(token)
+        if entry then
+            entries[#entries + 1] = entry
+            labels[#labels + 1] = token
+        else
+            print(("^1[OrvexORM Studio] Ignoring invalid orvex_studio_allow entry: %s^0"):format(token))
+        end
+    end
+    return entries, table.concat(labels, ", ")
+end
+
+local function allowEntryMatches(entry, host)
+    if entry.any then return true end
+    if entry.exact then return entry.exact == host end
+    local value = ipv4ToInteger(host)
+    return value ~= nil and (value & entry.mask) == entry.network
+end
+
+---@param host string
+local function isAddressAllowed(host)
+    for _, entry in ipairs(allowedAddresses) do
+        if allowEntryMatches(entry, host) then return true end
+    end
+    return false
 end
 
 -- ─── JSON encoder (minimal, for API responses) ────────────────────
 
-local function jsonEncode(val)
-    if type(val) == "nil" then return "null" end
-    if type(val) == "boolean" then return val and "true" or "false" end
-    if type(val) == "number" then return tostring(val) end
-    if type(val) == "string" then
-        return '"' .. val:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\r', '\\r'):gsub('\t', '\\t') .. '"'
+local JSON_SHORT_ESCAPES = {
+    ['"'] = '\\"', ["\\"] = "\\\\", ["\b"] = "\\b", ["\f"] = "\\f",
+    ["\n"] = "\\n", ["\r"] = "\\r", ["\t"] = "\\t",
+}
+
+local function escapeJsonChar(char)
+    return JSON_SHORT_ESCAPES[char] or ("\\u%04x"):format(char:byte())
+end
+
+local function encodeString(value)
+    return '"' .. value:gsub('[%c"\\]', escapeJsonChar) .. '"'
+end
+
+-- JSON has no NaN/Infinity: emit null so the browser can still parse the page.
+local function encodeNumber(value)
+    if value ~= value or value == math.huge or value == -math.huge then return "null" end
+    return tostring(value)
+end
+
+local function isArray(value)
+    if next(value) == nil then return true end
+    if #value == 0 then return false end
+    local maxIndex = 0
+    for key in pairs(value) do
+        if math.type(key) ~= "integer" or key < 1 then return false end
+        if key > maxIndex then maxIndex = key end
     end
-    if type(val) == "table" then
-        -- Array check
-        if #val > 0 or next(val) == nil then
-            local isArray = true
-            local maxIdx = 0
-            for k in pairs(val) do
-                if type(k) ~= "number" then isArray = false; break end
-                if k > maxIdx then maxIdx = k end
-            end
-            if maxIdx ~= #val then isArray = false end
-            if isArray then
-                local parts = {}
-                for i, v in ipairs(val) do parts[i] = jsonEncode(v) end
-                return "[" .. table.concat(parts, ",") .. "]"
-            end
-        end
-        -- Object
-        local parts = {}
-        for k, v in pairs(val) do
-            parts[#parts + 1] = jsonEncode(tostring(k)) .. ":" .. jsonEncode(v)
-        end
-        return "{" .. table.concat(parts, ",") .. "}"
+    return maxIndex == #value
+end
+
+local jsonEncode
+
+local function encodeTable(value)
+    local parts = {}
+    if isArray(value) then
+        for index, item in ipairs(value) do parts[index] = jsonEncode(item) end
+        return "[" .. table.concat(parts, ",") .. "]"
     end
-    return '"' .. tostring(val) .. '"'
+    for key, item in pairs(value) do
+        parts[#parts + 1] = encodeString(tostring(key)) .. ":" .. jsonEncode(item)
+    end
+    return "{" .. table.concat(parts, ",") .. "}"
+end
+
+jsonEncode = function(val)
+    local kind = type(val)
+    if kind == "nil" then return "null" end
+    if kind == "boolean" then return val and "true" or "false" end
+    if kind == "number" then return encodeNumber(val) end
+    if kind == "string" then return encodeString(val) end
+    if kind == "table" then return encodeTable(val) end
+    return encodeString(tostring(val))
 end
 
 -- ─── JSON decoder (minimal, for POST body) ─────────────────────────
@@ -376,18 +506,76 @@ end
 local function sendError(res, thrown, context)
     local appError = Errors.normalize(thrown)
     local errorId = appError.status >= 500 and Errors.generateId("ERR") or nil
-    local logContext = {
-        errorId = errorId,
-        correlationId = context.correlationId,
-        errorCode = appError.code,
-        route = context.route,
-        method = context.method,
-        technicalMessage = appError.technicalMessage,
-        stack = context.stack,
-    }
-    if appError.level == "error" then Logger.error("Studio request failed", logContext)
-    elseif appError.level == "warn" then Logger.warn("Studio request rejected", logContext) end
+    if not context.quiet then
+        local logContext = {
+            errorId = errorId,
+            correlationId = context.correlationId,
+            errorCode = appError.code,
+            route = context.route,
+            method = context.method,
+            technicalMessage = appError.technicalMessage,
+            stack = context.stack,
+        }
+        if appError.level == "error" then Logger.error("Studio request failed", logContext)
+        elseif appError.level == "warn" then Logger.warn("Studio request rejected", logContext) end
+    end
     sendJson(res, appError.status, Errors.toResponse(appError, errorId), context.correlationId)
+end
+
+-- Inactive Studio and refused addresses: reveal nothing and log nothing,
+-- so the public game port cannot be used to flood the console.
+local function sendSilentNotFound(res)
+    res.writeHead(404, {
+        ["Content-Type"] = "text/plain; charset=utf-8",
+        ["Cache-Control"] = "no-store",
+        ["X-Content-Type-Options"] = "nosniff",
+    })
+    res.send("Not Found")
+end
+
+local function contentSecurityPolicy(nonce)
+    return table.concat({
+        "default-src 'none'",
+        "connect-src 'self'",
+        "img-src 'self' data:",
+        ("style-src 'nonce-%s'"):format(nonce),
+        ("script-src 'nonce-%s'"):format(nonce),
+        "frame-ancestors 'none'",
+        "base-uri 'none'",
+        "form-action 'none'",
+    }, "; ")
+end
+
+local function sendStudioPage(res)
+    local nonce = generateNonce()
+    res.writeHead(200, {
+        ["Content-Type"] = "text/html; charset=utf-8",
+        ["Cache-Control"] = "no-store",
+        ["Content-Security-Policy"] = contentSecurityPolicy(nonce),
+        ["X-Content-Type-Options"] = "nosniff",
+        ["X-Frame-Options"] = "DENY",
+        ["Referrer-Policy"] = "no-referrer",
+        ["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()",
+    })
+    res.send((getStudioHTML():gsub("{{NONCE}}", nonce)))
+end
+
+local function headerValue(headers, name)
+    for key, value in pairs(headers) do
+        if type(key) == "string" and key:lower() == name then return value end
+    end
+    return nil
+end
+
+local function isPageRoute(path) return path == "/" or path == "" end
+
+-- The header is the only accepted carrier for API calls. The query-string
+-- token is tolerated on the page route only, for the URL printed in the console.
+local function requestTokenFrom(req, path, params)
+    local token = headerValue(req.headers or {}, "x-studio-token")
+    if token then return token end
+    if isPageRoute(path) then return params.token end
+    return nil
 end
 
 local function dispatchApi(path, method, params, body)
@@ -406,25 +594,21 @@ local function dispatchApi(path, method, params, body)
 end
 
 local function handleRequest(req, res)
-    local correlationId = correlationIdFrom(req)
-    if not studioActive then
-        sendError(res, Errors.new("SERVICE_UNAVAILABLE", "Studio is inactive"), {
-            correlationId = correlationId, route = req.path, method = req.method,
-        })
-        return
-    end
+    if not studioActive then return sendSilentNotFound(res) end
+    local address = hostFromAddress(req.address)
+    if not isAddressAllowed(address) then return sendSilentNotFound(res) end
 
-    -- Strip the port so lockouts apply per host, not per connection
-    local address = (req.address or "unknown"):match("^(.-):%d+$") or req.address or "unknown"
-    if exceedsRequestLimit(address) then
+    local correlationId = correlationIdFrom(req)
+    local exceeded, firstRateRejection = exceedsRequestLimit(address)
+    if exceeded then
         sendError(res, Errors.new("RATE_LIMITED", "Studio request rate exceeded"), {
-            correlationId = correlationId, route = req.path, method = req.method,
+            correlationId = correlationId, route = req.path, method = req.method, quiet = not firstRateRejection,
         })
         return
     end
     if isLockedOut(address) then
         sendError(res, Errors.new("RATE_LIMITED", "Studio token lockout"), {
-            correlationId = correlationId, route = req.path, method = req.method,
+            correlationId = correlationId, route = req.path, method = req.method, quiet = not claimLockoutReport(address),
         })
         return
     end
@@ -447,8 +631,7 @@ local function handleRequest(req, res)
     local params = parseQuery(queryString)
 
     -- Token check
-    local headers = req.headers or {}
-    local requestToken = headers["x-studio-token"] or headers["X-Studio-Token"] or params.token
+    local requestToken = requestTokenFrom(req, path, params)
     if os.time() >= studioTokenExpiresAt then
         studioActive = false
         studioToken = nil
@@ -466,20 +649,7 @@ local function handleRequest(req, res)
     end
     failedAttempts[address] = nil
 
-    -- Route: frontend
-    if path == "/" or path == "" then
-        res.writeHead(200, {
-            ["Content-Type"] = "text/html; charset=utf-8",
-            ["Cache-Control"] = "no-store",
-            ["Content-Security-Policy"] = "default-src 'none'; connect-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
-            ["X-Content-Type-Options"] = "nosniff",
-            ["X-Frame-Options"] = "DENY",
-            ["Referrer-Policy"] = "no-referrer",
-            ["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()",
-        })
-        res.send(getStudioHTML())
-        return
-    end
+    if isPageRoute(path) then return sendStudioPage(res) end
 
     local hasBody = method == "POST" or method == "PUT" or method == "DELETE"
     if hasBody and type(req.body) == "string" and #req.body > MAX_BODY_BYTES then
@@ -489,7 +659,7 @@ local function handleRequest(req, res)
         return
     end
     local body = hasBody and jsonDecode(req.body) or nil
-    if (method == "POST" or method == "PUT" or method == "DELETE") and req.body and req.body ~= "" and not body then
+    if hasBody and req.body and req.body ~= "" and not body then
         sendError(res, Errors.new("VALIDATION_ERROR", "Malformed JSON body"), {
             correlationId = correlationId, route = path, method = method,
         })
@@ -527,6 +697,7 @@ RegisterCommand("orvexstudio", function(source, args)
         studioActive = false
         studioToken = nil
         studioTokenExpiresAt = 0
+        allowedAddresses = {}
         failedAttempts = {}
         requestWindows = {}
         print("^2[OrvexORM Studio]^0 Studio stopped.")
@@ -545,6 +716,8 @@ RegisterCommand("orvexstudio", function(source, args)
         print("^1[OrvexORM Studio] " .. tokenError .. "^0")
         return
     end
+    local allowListLabel
+    allowedAddresses, allowListLabel = loadAllowList()
     studioToken = token
     studioTokenExpiresAt = os.time() + TOKEN_LIFETIME_SECONDS
     studioActive = true
@@ -559,9 +732,12 @@ RegisterCommand("orvexstudio", function(source, args)
     print("")
     print("^2  URL : ^6http://localhost:30120/" .. endpoint .. "/?token=" .. studioToken .. "^0")
     print("")
+    print("^2  Allowed addresses : ^6" .. (allowListLabel ~= "" and allowListLabel or "none") .. "^0 (convar orvex_studio_allow)")
+    print("")
     print("^3  Share this URL only with trusted people.^0")
-    print("^3  The endpoint is reachable on the public game port:^0")
-    print("^3  stop the Studio as soon as you are done.^0")
+    print("^3  Traffic is plain HTTP: from a remote machine, use an SSH tunnel^0")
+    print("^3  (ssh -L 30120:127.0.0.1:30120 user@server) instead of widening the allowlist.^0")
+    print("^3  Stop the Studio as soon as you are done.^0")
     print("^3  Type 'orvexstudio stop' to stop.^0")
     print("^3  This Studio session expires after 30 minutes.^0")
     print("")
