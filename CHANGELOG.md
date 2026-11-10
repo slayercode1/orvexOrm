@@ -3,7 +3,7 @@
 Toutes les evolutions notables d'OrvexORM. Le format suit [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/)
 et le projet respecte le [versionnage semantique](https://semver.org/lang/fr/).
 
-## [1.3.0] - Non publiee
+## [1.3.0] - 2026-11-10
 
 Version de corrections issue d'un audit complet (securite, exactitude du SQL, drivers, cache, Studio,
 documentation). La plupart des corrections sont invisibles pour un code correct ; les changements
