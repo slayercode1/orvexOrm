@@ -10,6 +10,10 @@ Les **agregations** te permettent de faire des calculs sur tes donnees : compter
 
 OrvexORM propose des raccourcis simples qui fonctionnent directement sur le modele.
 
+:::caution Ordre des arguments
+`count(where?)` prend le filtre en premier, alors que `sum`, `avg`, `min` et `max` prennent **la colonne d'abord** : `User.sum("money", { job = "police" })`. Les lignes supprimees en douceur (`softDelete`) sont exclues.
+:::
+
 ### `count` — Compter
 
 ```lua

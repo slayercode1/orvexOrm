@@ -202,6 +202,31 @@ User.query()
 -- SQL: WHERE job = ? OR job = ? OR job = ?
 ```
 
+Sur un modele avec `softDelete`, tes conditions sont **groupees entre parentheses** derriere le filtre du soft delete : un `orWhere` ne peut pas faire revenir les lignes supprimees.
+
+```sql
+WHERE deleted_at IS NULL AND (job = ? OR job = ? OR job = ?)
+```
+
+:::caution AND passe avant OR
+Les conditions sont jointes dans l'ordre d'appel et MySQL evalue `AND` avant `OR` :
+
+```lua
+User.query():where("money", ">", 1000):where("job", "police"):orWhere("job", "medic")
+-- WHERE money > ? AND job = ? OR job = ?
+-- = (money > 1000 ET policier) OU medecin (quel que soit son argent)
+```
+
+Pour « plus de 1000$ ET (policier OU medecin) », groupe toi-meme :
+
+```lua
+User.query()
+    :where("money", ">", 1000)
+    :whereRaw("(job = ? OR job = ?)", { "police", "medic" })
+-- ou plus simple ici : :whereIn("job", { "police", "medic" })
+```
+:::
+
 ---
 
 ## Trier avec `:orderBy()`
@@ -272,6 +297,8 @@ Pour une page donnee :
 - `offset` = (numero de page - 1) * limit
 
 Exemple : page 3, 10 resultats par page → `offset = (3-1) * 10 = 20`
+
+`limit` et `offset` n'acceptent que des entiers positifs (ou des chaines numeriques comme `"20"`). Toute autre valeur leve une erreur : tu peux leur passer un numero de page venu du client sans risque d'injection, mais convertis-le et borne-le quand meme (`math.min(tonumber(x) or 1, 100)`).
 :::
 
 ### Raccourci : `:paginate(page, perPage)`
@@ -409,8 +436,10 @@ User.query()
     :select("identifier, money")
     :where({ job = "police" })
     :get()
--- SQL: SELECT identifier, money FROM users WHERE job = ?
+-- SQL: SELECT `identifier`, `money` FROM `users` WHERE `job` = ?
 ```
+
+Les noms simples sont echappes, les expressions (`COUNT(*) AS nb`) gardees telles quelles. Ne construis jamais cette chaine a partir d'une saisie du joueur. Note : `:select()` prend une **chaine**, alors que l'option `select` de `find` / `findAll` prend un **tableau** (`{ "identifier", "money" }`).
 
 ---
 
@@ -427,7 +456,7 @@ local sql, params = User.query()
     :toSQL()
 
 print(sql)
--- SELECT * FROM users WHERE job = ? AND money > ? ORDER BY money DESC LIMIT 5
+-- SELECT * FROM `users` WHERE `job` = ? AND `money` > ? ORDER BY `money` DESC LIMIT 5
 
 print(params[1], params[2])
 -- police    500
@@ -463,18 +492,30 @@ if hasCops then
 end
 ```
 
-### `:chunk(size, callback)` — Traiter par lots
+### `:chunkById(size, callback, column?)` — Traiter par lots (recommande)
 
-Traite les resultats par paquets pour eviter de tout charger en memoire.
+Traite les resultats par paquets pour eviter de tout charger en memoire. Chaque lot reprend apres la derniere cle vue (`WHERE id > ? ORDER BY id LIMIT 100`) : le cout est le meme pour le premier et le millieme lot, et modifier ou supprimer les lignes dans la callback ne fait sauter aucune ligne.
 
 ```lua
--- Traiter tous les joueurs par lots de 100
-User.query():chunk(100, function(players, chunkIndex)
+-- Traiter tous les joueurs par lots de 100, sur leur cle primaire
+User.query():chunkById(100, function(players, chunkIndex)
     print("Lot " .. chunkIndex .. " : " .. #players .. " joueurs")
     for _, player in ipairs(players) do
-        -- traitement...
+        player:update({ money = 0 })
     end
     -- Retourner false pour arreter
+end, "identifier")  -- colonne unique ; "id" par defaut
+```
+
+### `:chunk(size, callback)` — Traiter par lots (OFFSET)
+
+Meme principe avec `LIMIT` / `OFFSET`. Plus simple, mais MySQL relit toutes les lignes precedentes a chaque lot (lent sur une grosse table), et si la callback modifie les lignes de facon qu'elles ne correspondent plus au filtre, des lignes sont **sautees**. Reserve-le aux petites tables en lecture seule.
+
+```lua
+User.query():chunk(100, function(players, chunkIndex)
+    for _, player in ipairs(players) do
+        print(player.identifier)
+    end
 end)
 ```
 

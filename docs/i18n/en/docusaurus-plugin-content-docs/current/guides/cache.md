@@ -17,6 +17,12 @@ OrvexORM.enableCache({ ttl = 60 })
 
 The **TTL** (Time To Live) is the duration in seconds that data remains in the cache before being considered stale.
 
+The global cache holds at most **1000 entries**. When it is full, the **least recently read** entry is evicted (LRU). Expired entries are purged as writes happen, at most once per TTL: memory does not grow forever.
+
+:::info One cache per resource
+The cache lives in the resource's memory. With `@orvexorm/lib/import.lua`, each resource has **its own** cache: `enableCache()` in resource A enables nothing in resource B, and a write made by B does not invalidate A's cache. If several resources (or another script, or a tool such as HeidiSQL) write to the same tables, keep a short TTL or leave the cache off for those models.
+:::
+
 ## How it works
 
 ### Without cache
@@ -58,13 +64,22 @@ Operations that invalidate the cache:
 
 | Operation | Invalidates cache? |
 |---|---|
-| `create()` | Yes |
+| `create()`, `createMany()`, `createWith()` | Yes |
 | `upsert()` | Yes |
-| `update()` (class and instance) | Yes |
-| `delete()` (class and instance) | Yes |
+| `update()` / `updateWhere()` (class and instance) | Yes |
+| `delete()`, `forceDelete()`, `restore()` (class and instance) | Yes |
+| `increment()` / `decrement()` | Yes |
 | `attach()` / `detach()` | Yes (pivot table) |
+| `OrvexORM.transaction` / `tx:commit()` | Yes, for every table written, **after** a successful commit |
+| `OrvexORM.raw()` / `rawExec()` that writes | Yes: the written table, or the **whole** cache when it cannot be told |
 | `find()` / `findAll()` | No (read-only) |
 | `query():get()` | No (read-only) |
+
+Invalidation is **exact**: writing to `users` only drops the entries that read `users` (including through a join or a subquery), not those of `users_logs`. It only costs the number of entries of that table.
+
+:::caution What the cache cannot see
+A write made **outside this resource** (another resource, another SQL script, the Studio, an external tool) invalidates nothing: reads can stay stale until the TTL. Transactions and `raw` only invalidate the **global** cache: a model with its own `opts.cache` must be flushed by hand (`Model.flushCache()`).
+:::
 
 ## Managing the cache manually
 
@@ -83,27 +98,28 @@ OrvexORM.flushCache()
 ### Disable the cache
 
 ```lua
-OrvexORM.disableCache()
+OrvexORM.disableCache()  -- disables and empties the global cache
 ```
 
-## Monitoring the cache
+### Checking the statistics
 
-`OrvexORM.cacheStats()` returns global cache statistics, useful for checking that the cache is actually helping:
+`OrvexORM.cacheStats()` tells you whether your cache is effective:
 
 ```lua
 local stats = OrvexORM.cacheStats()
 
-print(stats.hits)     -- number of cache hits
-print(stats.misses)   -- number of cache misses
-print(stats.hitRate)  -- hit ratio (hits / (hits + misses))
+print(stats.hits)     -- reads served from the cache
+print(stats.misses)   -- reads that queried the database
+print(stats.hitRate)  -- ratio hits / (hits + misses)
 print(stats.entries)  -- number of entries currently cached
+print(stats.maxEntries) -- maximum size (1000 for the global cache)
 ```
 
-:::tip
-A low `hitRate` means most queries never hit the cache — try increasing the TTL, or check that you're not caching data that changes on every query.
+:::tip Reading the hitRate
+A `hitRate` close to 1 means most reads come from the cache. If it is very low, your TTL may be too short, or your queries are too varied to benefit from the cache.
 :::
 
-## Choosing the right TTL
+## Which TTL to choose?
 
 | Situation | Recommended TTL |
 |---|---|
@@ -115,7 +131,7 @@ A low `hitRate` means most queries never hit the cache — try increasing the TT
 The cache may return slightly stale data (up to the TTL). For critical operations like money transfers, it's safer to **not** cache this data or to use a very short TTL.
 :::
 
-## Cache with the Query Builder
+## The cache with the Query Builder
 
 The cache also works with the Query Builder:
 
@@ -136,4 +152,29 @@ local cops2 = User.query()
 -- → no SQL query, identical result from the cache
 ```
 
-Aggregations (`count`, `sum`, `avg`, `min`, `max`) are also cached.
+Aggregations (`count`, `sum`, `avg`, `min`, `max`) are also cached. `chunk` / `chunkById` scans are not (they would evict useful entries).
+
+A query with a parameter that is a table, a function or a userdata is **not** cached (its key would not be reliable). Parameters are told apart by type: `1` and `"1"`, or `true` and `"true"`, give different entries.
+
+## One cache per model
+
+A model can have its own cache, with its own settings, through the `cache` option. The global `OrvexCache` class is available in orvexorm and in every resource that uses `lib/import.lua`:
+
+```lua
+local Config = OrvexORM.model("server_config", { key = "string", value = "json" }, {
+    primaryKey = "key",
+    cache = OrvexCache.new({
+        ttl = 300,          -- 5 minutes
+        maxEntries = 200,   -- default: 1000
+    }),
+})
+```
+
+| `OrvexCache.new` option | Default | Description |
+|---|---|---|
+| `ttl` | `60` | Time to live in seconds |
+| `maxEntries` | `1000` | Maximum number of entries (LRU eviction) |
+| `sweepInterval` | `ttl` (min. 1 s) | Minimum interval between two purges of expired entries |
+| `enabled` | `true` | A cache created this way is **active** right away, even if the global cache is off |
+
+This cache is not affected by `OrvexORM.enableCache`, `disableCache`, `flushCache` or `cacheStats`. Use its methods: `cache:setEnabled(bool)`, `cache:flush()`, `cache:stats()`, `cache:purgeExpired()` (returns the number of entries removed), or `Model.flushCache()`.

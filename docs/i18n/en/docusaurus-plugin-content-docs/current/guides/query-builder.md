@@ -32,9 +32,15 @@ Each method adds a piece to the query. At the end, `:get()` executes the query a
 ### Simple equality
 
 ```lua
--- All police officers
+-- All police officers (table)
 User.query()
     :where({ job = "police" })
+    :get()
+-- SQL: WHERE job = ?
+
+-- Or as a shortcut (2 arguments, implicit =)
+User.query()
+    :where("job", "police")
     :get()
 -- SQL: WHERE job = ?
 ```
@@ -91,9 +97,9 @@ When you chain multiple `:where()` calls, they are joined by **AND** (both condi
 ```
 
 The `%` is a wildcard that matches any text:
-- `"%poli%"` — contains "poli" anywhere
-- `"poli%"` — starts with "poli"
-- `"%poli"` — ends with "poli"
+- `"%poli%"` → contains "poli" anywhere
+- `"poli%"` → starts with "poli"
+- `"%poli"` → ends with "poli"
 
 ### IN (among a list)
 
@@ -125,6 +131,54 @@ The `%` is a wildcard that matches any text:
 
 ---
 
+### Shortcuts for common filters
+
+Instead of the `{ col = { "OP", val } }` syntax, you can use dedicated methods:
+
+```lua
+-- whereIn: among a list of values
+User.query():whereIn("job", { "police", "medic", "fire" }):get()
+
+-- whereNotIn: not in the list
+User.query():whereNotIn("id", { 1, 2, 3 }):get()
+
+-- whereBetween: between two values
+User.query():whereBetween("money", 500, 5000):get()
+
+-- whereNotBetween: outside the range
+User.query():whereNotBetween("money", 0, 100):get()
+
+-- whereLike: text search
+User.query():whereLike("name", "%john%"):get()
+```
+
+---
+
+## Raw SQL with `:whereRaw()`
+
+When no method covers your need, `:whereRaw(clause, params?)` lets you write a raw SQL clause. It is wrapped in parentheses and joined with the other conditions by **AND**.
+
+```lua
+-- SQL function in the condition
+User.query()
+    :whereRaw("LOWER(job) = ?", { "police" })
+    :get()
+-- SQL: WHERE (LOWER(job) = ?)
+
+-- OR nested inside a group
+User.query()
+    :where({ status = "active" })
+    :whereRaw("money > ? OR job = ?", { 10000, "police" })
+    :get()
+-- SQL: WHERE status = ? AND (money > ? OR job = ?)
+```
+
+:::caution SQL injection
+**Always** pass values through `params`, never by string concatenation. `:whereRaw("name = '" .. input .. "'")` is an open door to SQL injection.
+:::
+
+---
+
 ## OR WHERE
 
 By default, conditions are joined by **AND**. To use **OR**:
@@ -148,38 +202,29 @@ User.query()
 -- SQL: WHERE job = ? OR job = ? OR job = ?
 ```
 
----
+On a model with `softDelete`, your conditions are **grouped in parentheses** after the soft delete filter: an `orWhere` cannot bring deleted rows back.
 
-## Raw clauses with `:whereRaw()`
-
-Sometimes you need a condition that `:where()` can't express (SQL functions, custom expressions). `:whereRaw()` lets you write the clause yourself. It's wrapped in parentheses and joined by **AND**:
-
-```lua
--- Police officers, case-insensitive
-User.query()
-    :whereRaw("LOWER(job) = ?", { "police" })
-    :get()
--- SQL: WHERE (LOWER(job) = ?)
-
--- Combined with other conditions
-User.query()
-    :where({ job = "police" })
-    :whereRaw("money > ? OR kills > ?", { 1000, 50 })
-    :get()
--- SQL: WHERE job = ? AND (money > ? OR kills > ?)
+```sql
+WHERE deleted_at IS NULL AND (job = ? OR job = ? OR job = ?)
 ```
 
-:::caution Never concatenate values
-Always pass values through the `params` table (`?` placeholders). **Never** build the clause by string concatenation — that opens the door to SQL injection.
+:::caution AND binds before OR
+Conditions are joined in call order and MySQL evaluates `AND` before `OR`:
 
 ```lua
--- ❌ DANGEROUS: SQL injection possible
-:whereRaw("job = '" .. input .. "'")
-
--- ✅ SAFE: value passed as a parameter
-:whereRaw("job = ?", { input })
+User.query():where("money", ">", 1000):where("job", "police"):orWhere("job", "medic")
+-- WHERE money > ? AND job = ? OR job = ?
+-- = (more than 1000 AND officer) OR medic (whatever their money)
 ```
 
+For "more than $1000 AND (officer OR medic)", group it yourself:
+
+```lua
+User.query()
+    :where("money", ">", 1000)
+    :whereRaw("(job = ? OR job = ?)", { "police", "medic" })
+-- or simpler here: :whereIn("job", { "police", "medic" })
+```
 :::
 
 ---
@@ -202,8 +247,23 @@ User.query()
 
 | Direction | Meaning |
 |---|---|
-| `"ASC"` | Ascending (A to Z, 0 to 9). This is the default. |
-| `"DESC"` | Descending (Z to A, 9 to 0) |
+| `"ASC"` | Ascending (A → Z, 0 → 9). This is the default. |
+| `"DESC"` | Descending (Z → A, 9 → 0) |
+
+### Sorting shortcuts
+
+```lua
+-- Shortcuts without giving the direction
+User.query():orderByDesc("money"):get()   -- ORDER BY money DESC
+User.query():orderByAsc("name"):get()     -- ORDER BY name ASC
+
+-- Newest / oldest first (uses created_at by default)
+User.query():latest():get()               -- ORDER BY created_at DESC
+User.query():oldest():get()               -- ORDER BY created_at ASC
+
+-- With a custom column
+User.query():latest("updated_at"):get()   -- ORDER BY updated_at DESC
+```
 
 ---
 
@@ -236,8 +296,39 @@ For a given page:
 - `limit` = number of results per page
 - `offset` = (page number - 1) * limit
 
-Example: page 3, 10 results per page -> `offset = (3-1) * 10 = 20`
+Example: page 3, 10 results per page → `offset = (3-1) * 10 = 20`
+
+`limit` and `offset` only accept non-negative integers (or numeric strings such as `"20"`). Any other value raises an error: you can pass them a page number coming from the client without injection risk, but still convert and clamp it (`math.min(tonumber(x) or 1, 100)`).
 :::
+
+### Shortcut: `:paginate(page, perPage)`
+
+Instead of computing limit/offset yourself, use `:paginate()`:
+
+```lua
+local page = User.query()
+    :where({ job = "police" })
+    :orderBy("money", "DESC")
+    :paginate(2, 10)
+
+print(page.total)     -- total number of results (e.g. 25)
+print(page.page)      -- 2
+print(page.perPage)   -- 10
+print(page.lastPage)  -- 3 (ceil(25/10))
+print(#page.data)     -- 10 (the results of page 2)
+
+for _, player in ipairs(page.data) do
+    print(player.identifier .. " — " .. player.money .. "$")
+end
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `data` | `OrvexInstance[]` | The results of the page |
+| `total` | `integer` | Total number of records |
+| `page` | `integer` | Current page number |
+| `perPage` | `integer` | Number of items per page (default: 15) |
+| `lastPage` | `integer` | Number of the last page |
 
 ### Shortcut: `:first()`
 
@@ -345,8 +436,10 @@ User.query()
     :select("identifier, money")
     :where({ job = "police" })
     :get()
--- SQL: SELECT identifier, money FROM users WHERE job = ?
+-- SQL: SELECT `identifier`, `money` FROM `users` WHERE `job` = ?
 ```
+
+Plain names are quoted, expressions (`COUNT(*) AS nb`) are kept as is. Never build this string from player input. Note: `:select()` takes a **string**, whereas the `select` option of `find` / `findAll` takes an **array** (`{ "identifier", "money" }`).
 
 ---
 
@@ -363,7 +456,7 @@ local sql, params = User.query()
     :toSQL()
 
 print(sql)
--- SELECT * FROM users WHERE job = ? AND money > ? ORDER BY money DESC LIMIT 5
+-- SELECT * FROM `users` WHERE `job` = ? AND `money` > ? ORDER BY `money` DESC LIMIT 5
 
 print(params[1], params[2])
 -- police    500
@@ -375,9 +468,62 @@ Use `:toSQL()` when something isn't working as expected. It shows you exactly wh
 
 ---
 
+## Utility methods
+
+### `:pluck(column)` — Extract a column
+
+Returns an array with only the values of one column, without building instances.
+
+```lua
+local jobs = User.query():pluck("job")
+-- { "police", "medic", "firefighter" }
+
+local richJobs = User.query():where("money", ">", 10000):pluck("job")
+```
+
+### `:exists()` — Check existence
+
+Returns `true` or `false` without loading the data. Faster than `:get()`.
+
+```lua
+local hasCops = User.query():where("job", "police"):exists()
+if hasCops then
+    print("There are officers!")
+end
+```
+
+### `:chunkById(size, callback, column?)` — Batch processing (recommended)
+
+Processes the results in batches to avoid loading everything into memory. Each batch resumes after the last key seen (`WHERE id > ? ORDER BY id LIMIT 100`): the cost is the same for the first and the thousandth batch, and changing or deleting rows in the callback skips no row.
+
+```lua
+-- Process every player in batches of 100, on their primary key
+User.query():chunkById(100, function(players, chunkIndex)
+    print("Batch " .. chunkIndex .. ": " .. #players .. " players")
+    for _, player in ipairs(players) do
+        player:update({ money = 0 })
+    end
+    -- Return false to stop
+end, "identifier")  -- unique column; "id" by default
+```
+
+### `:chunk(size, callback)` — Batch processing (OFFSET)
+
+Same idea with `LIMIT` / `OFFSET`. Simpler, but MySQL rereads every previous row for each batch (slow on a large table), and if the callback changes rows so that they no longer match the filter, rows are **skipped**. Keep it for small read-only tables.
+
+```lua
+User.query():chunk(100, function(players, chunkIndex)
+    for _, player in ipairs(players) do
+        print(player.identifier)
+    end
+end)
+```
+
+---
+
 ## Full example
 
-Here's a realistic example — a leaderboard system for the richest players:
+Here's a realistic example — a leaderboard of the richest players:
 
 ```lua
 -- Top 10 richest players who aren't banned

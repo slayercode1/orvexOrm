@@ -30,8 +30,14 @@ Le studio :
 
   URL : http://localhost:30120/orvexorm/?token=a1b2c3d4e5f6...
 
+  Allowed addresses : 127.0.0.1, ::1 (convar orvex_studio_allow)
+
   Share this URL only with trusted people.
+  Traffic is plain HTTP: from a remote machine, use an SSH tunnel
+  (ssh -L 30120:127.0.0.1:30120 user@server) instead of widening the allowlist.
+  Stop the Studio as soon as you are done.
   Type 'orvexstudio stop' to stop.
+  This Studio session expires after 30 minutes.
 
 ══════════════════════════════════════════════════
 ```
@@ -41,28 +47,72 @@ Pour arreter :
 orvexstudio stop
 ```
 
-### Acces a distance
+### Acces a distance : tunnel SSH (recommande)
 
-Si tu es sur un serveur dedie, remplace `localhost` par l'IP de ton serveur :
-```
-http://123.45.67.89:30120/orvexorm/?token=a1b2c3d4...
+Par defaut, le Studio ne repond **qu'aux connexions locales** (`127.0.0.1` et `::1`). Si ton serveur est distant, ne l'ouvre pas au reseau : cree un tunnel SSH depuis ton PC, qui fait passer ta connexion pour une connexion locale.
+
+```bash
+# Sur ton PC
+ssh -L 30120:127.0.0.1:30120 user@ton-serveur
 ```
 
-Le port `30120` est le port HTTP de FiveM (le meme que ton serveur).
+Laisse ce terminal ouvert, puis ouvre dans ton navigateur l'URL affichee dans la console, telle quelle :
+
+```
+http://localhost:30120/orvexorm/?token=a1b2c3d4...
+```
+
+Le port `30120` est le port HTTP de FiveM (le meme que ton serveur). Si ton serveur utilise un autre port, adapte les deux cotes du tunnel (`-L 30120:127.0.0.1:<port>`).
+
+### Autoriser d'autres adresses : `orvex_studio_allow`
+
+Le convar `orvex_studio_allow` liste les adresses autorisees. Il est lu **au lancement de `orvexstudio`** : modifie-le avant de lancer le Studio (ou fais `orvexstudio stop` puis `orvexstudio`).
+
+```cfg title="server.cfg (ou console)"
+# Defaut : loopback uniquement
+set orvex_studio_allow "127.0.0.1, ::1"
+
+# Ajouter un poste du reseau local et une plage IPv4
+set orvex_studio_allow "127.0.0.1, ::1, 192.168.1.20, 10.0.0.0/24"
+
+# N'importe quelle adresse (deconseille)
+set orvex_studio_allow "*"
+```
+
+| Entree | Exemple | Effet |
+|---|---|---|
+| Adresse IPv4 ou IPv6 exacte | `192.168.1.20`, `::1` | Autorise cette adresse |
+| Plage IPv4 CIDR | `10.0.0.0/24` | Autorise toute la plage |
+| `*` | `*` | Autorise toutes les adresses |
+
+Les entrees sont separees par des virgules ou des espaces. Une entree invalide est ignoree (un message s'affiche dans la console) ; si aucune entree n'est valide, **personne** n'est autorise. Une valeur vide revient au defaut.
+
+:::danger Le trafic est en HTTP clair
+Le Studio n'a pas de HTTPS : en elargissant la liste, le token et le contenu de ta base passent **en clair** sur le reseau. Prefere toujours le tunnel SSH.
+:::
+
+:::caution Derriere un proxy (txAdmin, reverse proxy)
+Derriere un proxy, l'adresse vue par le Studio est celle **du proxy**, pour tous les clients. La liste d'autorisation, la limite de requetes et le verrouillage anti-bruteforce s'appliquent alors au proxy entier. N'autorise jamais l'adresse d'un proxy expose sur internet.
+:::
 
 ## Securite
 
 Le studio est protege par un **token aleatoire** genere a chaque lancement. Si la source aleatoire du systeme n'est pas disponible, le demarrage echoue au lieu de creer un token previsible. Tu peux fournir un token stable avec `set orvex_studio_token "..."` ; il doit contenir au moins 32 caracteres.
 
-- Le token initial est dans l'URL, puis il est retire de la barre d'adresse et envoye dans l'en-tete `X-Studio-Token`
+- **Filtrage reseau** : une requete venant d'une adresse hors de `orvex_studio_allow` recoit un simple `404 Not Found`, sans log
+- Studio arrete : toute requete recoit le meme `404 Not Found` (pas de log, rien ne trahit sa presence)
+- Le token dans l'URL (`?token=`) n'est accepte **que pour le premier chargement de la page**. La page le retire de la barre d'adresse, le garde en memoire et l'envoie ensuite dans l'en-tete `X-Studio-Token`. Les routes `/api/*` refusent le token en parametre d'URL (`403`)
+- Recharger la page apres le retrait du token donne un `403` : rouvre l'URL affichee dans la console
 - Aucun cookie d'authentification n'est cree
 - Le token expire apres **30 minutes** ; relance `orvexstudio` pour obtenir une nouvelle session
-- Sans le token, toute requete retourne `403 Access Denied`
+- Sans token valide, la requete retourne `403`
 - **Protection anti-bruteforce** : une IP est verrouillee pendant **5 minutes** apres **5 tokens invalides**
-- Les requetes sont limitees a **120 par minute et par adresse** et les corps a **1 Mio**
+- Les requetes sont limitees a **120 par minute et par adresse** (verifie avant le token) et les corps a **1 Mio**
+- Les refus pour limite de requetes ou verrouillage sont journalises **une fois** par fenetre ou par verrouillage, pas a chaque requete
+- La page est servie avec une politique CSP stricte (scripts et styles limites a un nonce par chargement) et les donnees des lignes sont toujours inserees comme du texte : une valeur stockee par un joueur ne peut pas executer de script dans ton navigateur
 
 :::caution
-OrvexORM Studio est un **outil de developpement**. L'endpoint est expose sur le port public `30120` (le port HTTP de FiveM) : tant que le studio tourne, n'importe qui connaissant le token a un acces complet a ta base de donnees. Le token est regenere a chaque demarrage, mais prends l'habitude d'arreter le studio (`orvexstudio stop`) des que tu as fini.
+OrvexORM Studio est un **outil de developpement**. Tant qu'il tourne, quiconque a le token **et** une adresse autorisee a un acces complet a ta base de donnees. Le token est regenere a chaque demarrage, mais prends l'habitude d'arreter le studio (`orvexstudio stop`) des que tu as fini.
 :::
 
 ## Fonctionnalites
@@ -104,3 +154,11 @@ L'onglet "Schema" affiche la structure de la table (colonnes, types, cles, valeu
 | Raccourci | Action |
 |---|---|
 | `Escape` | Fermer la modale |
+
+## Personnaliser `studio.html`
+
+La page est servie avec une politique CSP sans `'unsafe-inline'`. Si tu modifies `studio.html` :
+
+- n'ajoute pas d'attributs `onclick` / `style` inline : ils seraient bloques ;
+- garde le placeholder `{{NONCE}}` sur les balises `<script>` et `<style>` (`<script nonce="{{NONCE}}">`), remplace a chaque chargement par un nonce aleatoire ;
+- n'insere jamais une valeur de ligne avec `innerHTML` : utilise `textContent` ou `.value`.

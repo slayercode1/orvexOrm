@@ -5,7 +5,7 @@ slug: /examples
 
 # Practical Examples
 
-Ready-to-use examples for the most common use cases on a FiveM server.
+Ready-to-use examples for the most common use cases on a FiveM server. Models are defined at the top level of the script (no query); database calls are made in event handlers, commands or threads, which can wait for MySQL ([Async and threads](/docs/getting-started#async-and-threads)).
 
 ---
 
@@ -27,7 +27,7 @@ CREATE TABLE `users` (
 ### Lua Code
 
 ```lua
-local User = OrvexOrvexORM.model("users", {
+local User = OrvexORM.model("users", {
     identifier = "string",
     money      = "number",
     bank       = "number",
@@ -35,22 +35,21 @@ local User = OrvexOrvexORM.model("users", {
     group      = "string",
 }, { primaryKey = "identifier" })
 
--- Player connection
-AddEventHandler("playerConnecting", function()
+-- Player connection (deferrals: the connection waits for the database)
+AddEventHandler("playerConnecting", function(name, setKickReason, deferrals)
     local src = source
+    deferrals.defer()
+    Wait(0)
+
     local license = GetPlayerIdentifierByType(src, "license")
+    User.findOrCreate({ identifier = license }, {
+        money = 500,
+        bank  = 5000,
+        job   = "unemployed",
+        group = "user",   -- `group` is a MySQL reserved word: the ORM quotes it
+    })
 
-    local player = User.find({ identifier = license })
-
-    if not player then
-        player = User.create({
-            identifier = license,
-            money      = 500,
-            bank       = 5000,
-            job        = "unemployed",
-            group      = "user",
-        })
-    end
+    deferrals.done()
 end)
 
 -- Save on disconnect
@@ -71,9 +70,8 @@ RegisterCommand("givemoney", function(src, args)
     local amount = tonumber(args[2])
     local license = GetPlayerIdentifierByType(targetId, "license")
 
-    local player = User.find({ identifier = license })
-    if player then
-        player:update({ money = player.money + amount })
+    -- increment computes in MySQL (money = money + ?): no concurrent write is lost
+    if amount and User.increment("money", amount, { identifier = license }) > 0 then
         print("Gave " .. amount .. "$ to " .. license)
     end
 end, true)
@@ -299,3 +297,165 @@ RegisterCommand("search", function(src, args)
     end
 end, true)
 ```
+
+---
+
+## Pagination
+
+```lua
+-- Show players page by page
+RegisterCommand("players", function(src, args)
+    local pageNum = tonumber(args[1]) or 1
+
+    local page = User.query()
+        :orderBy("money", "DESC")
+        :paginate(pageNum, 10)
+
+    print(("Page %d/%d (%d players in total)"):format(
+        page.page, page.lastPage, page.total
+    ))
+
+    for i, player in ipairs(page.data) do
+        print(("  %s — %d$"):format(player.identifier, player.money))
+    end
+end, false)
+```
+
+---
+
+## Money transfer
+
+A transaction does not check the affected row count between two statements: a conditional debit that finds too little money does not stop the credit that follows. So the transfer is done with **one conditional statement**, whose result is checked (details in the [Transactions guide](/docs/guides/transactions#money-transfer)).
+
+```lua
+local function transferMoney(fromId, toId, amount)
+    if fromId == toId or type(amount) ~= "number" or amount <= 0 then
+        return false
+    end
+
+    local affected = OrvexORM.rawExec([[
+        UPDATE users AS sender
+        JOIN users AS receiver ON receiver.identifier = ?
+        SET sender.money = sender.money - ?,
+            receiver.money = receiver.money + ?
+        WHERE sender.identifier = ? AND sender.money >= ?
+    ]], { toId, amount, amount, fromId, amount })
+
+    return affected == 2  -- sender + receiver changed
+end
+
+RegisterCommand("pay", function(src, args)
+    local from = GetPlayerIdentifierByType(src, "license")
+    local to = GetPlayerIdentifierByType(tonumber(args[1]), "license")
+    local amount = math.floor(tonumber(args[2]) or 0)
+
+    if transferMoney(from, to, amount) then
+        print(("Transfer of %d$ succeeded"):format(amount))
+    else
+        print("Transfer refused: insufficient balance or unknown player")
+    end
+end, false)
+```
+
+## Transaction callback
+
+For several **unconditional** writes that must succeed together:
+
+```lua
+local function resetPlayer(identifier)
+    return OrvexORM.transaction(function(tx)
+        tx:delete("vehicles", { owner = identifier })
+        tx:delete("inventories", { owner = identifier })
+        tx:update("users", { money = 500, bank = 0 }, { identifier = identifier })
+    end)
+end
+```
+
+---
+
+## findOrFail, exists, pluck
+
+```lua
+-- findOrFail: no need to check for nil
+RegisterCommand("getplayer", function(src, args)
+    local ok, err = pcall(function()
+        local player = User.findOrFail({ identifier = args[1] })
+        print(player.identifier .. " has " .. player.money .. "$")
+    end)
+    if not ok then
+        print("Player not found: " .. args[1])
+    end
+end, true)
+
+-- exists: check quickly without loading the data
+RegisterCommand("checkplayer", function(src, args)
+    if User.exists({ identifier = args[1] }) then
+        print("The player exists")
+    else
+        print("Player not found")
+    end
+end, true)
+
+-- pluck: just the values of one column
+RegisterCommand("alljobs", function()
+    local jobs = User.pluck("job")
+    print("Jobs: " .. table.concat(jobs, ", "))
+end, false)
+
+-- chunkById: batch processing (constant cost, even on a large table)
+RegisterCommand("resetall", function()
+    User.query():chunkById(50, function(players, idx)
+        print("Processing batch " .. idx .. " (" .. #players .. " players)")
+        for _, p in ipairs(players) do
+            p:update({ money = 0 })
+        end
+    end, "identifier")
+    print("Every player has been reset")
+end, true)
+```
+
+---
+
+## Reusable scopes
+
+```lua
+-- Define scopes to filter easily
+local User = OrvexORM.model("users", {
+    identifier = "string",
+    money      = "number",
+    job        = "string",
+    group      = "string",
+}, {
+    primaryKey = "identifier",
+    scopes = {
+        rich = function(b) b:where("money", ">", 10000) end,
+        vip  = function(b) b:where("group", "vip") end,
+        cops = function(b) b:where("job", "police") end,
+    },
+})
+
+RegisterCommand("vipcops", function()
+    -- Use the scopes as methods
+    local richPlayers = User.rich():orderBy("money", "DESC"):get()
+    local vipCops     = User.vip():where("job", "police"):get()
+
+    -- Combine with findAll and operators
+    local richCops = User.findAll({
+        job   = "police",
+        money = { ">", 10000 },
+    })
+    print(#richPlayers, #vipCops, #richCops)
+end, true)
+```
+
+---
+
+## OrvexORM Studio
+
+To view and manage your database without writing code, type in the txAdmin console:
+
+```
+orvexstudio
+```
+
+The studio opens in your browser with a secure link. Zero installation, it's built into the resource. See the full guide: [Studio](/docs/guides/studio).

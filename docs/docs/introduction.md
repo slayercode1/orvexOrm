@@ -60,7 +60,7 @@ local User = ORM.model("users", {
 })
 ```
 
-**Etape 2** : Tu utilises ce modele pour interagir avec la base de donnees :
+**Etape 2** : Tu utilises ce modele pour interagir avec la base de donnees (dans un event, une commande ou un `CreateThread` : chaque appel attend la reponse de MySQL) :
 
 ```lua
 -- Creer un joueur
@@ -88,4 +88,4 @@ Pour utiliser OrvexORM, tu as besoin de :
 - **[oxmysql](https://github.com/overextended/oxmysql)** ou **[mysql-async](https://github.com/brouznouf/fivem-mysql-async)** installe et configure
 - Une base de donnees **MySQL** ou **MariaDB** connectee a ton serveur
 
-OrvexORM detecte automatiquement quelle librairie MySQL est installee. Passe a la page [Installation](/docs/installation).
+OrvexORM utilise oxmysql s'il est demarre, sinon mysql-async (3.3+ pour les transactions), sans configuration. Passe a la page [Installation](/docs/installation).

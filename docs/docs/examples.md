@@ -5,7 +5,7 @@ slug: /examples
 
 # Exemples concrets
 
-Des exemples prets a l'emploi pour les cas d'usage les plus courants sur un serveur FiveM.
+Des exemples prets a l'emploi pour les cas d'usage les plus courants sur un serveur FiveM. Les modeles sont definis au niveau superieur du script (aucune requete) ; les appels a la base sont faits dans des handlers d'event, des commandes ou des threads, qui peuvent attendre MySQL ([Async et threads](/docs/getting-started#async-et-threads)).
 
 ---
 
@@ -35,22 +35,21 @@ local User = OrvexORM.model("users", {
     group      = "string",
 }, { primaryKey = "identifier" })
 
--- Connexion d'un joueur
-AddEventHandler("playerConnecting", function()
+-- Connexion d'un joueur (deferrals : la connexion attend la base)
+AddEventHandler("playerConnecting", function(name, setKickReason, deferrals)
     local src = source
+    deferrals.defer()
+    Wait(0)
+
     local license = GetPlayerIdentifierByType(src, "license")
+    User.findOrCreate({ identifier = license }, {
+        money = 500,
+        bank  = 5000,
+        job   = "unemployed",
+        group = "user",   -- `group` est un mot reserve MySQL : l'ORM l'echappe
+    })
 
-    local player = User.find({ identifier = license })
-
-    if not player then
-        player = User.create({
-            identifier = license,
-            money      = 500,
-            bank       = 5000,
-            job        = "unemployed",
-            group      = "user",
-        })
-    end
+    deferrals.done()
 end)
 
 -- Sauvegarder a la deconnexion
@@ -71,9 +70,8 @@ RegisterCommand("givemoney", function(src, args)
     local amount = tonumber(args[2])
     local license = GetPlayerIdentifierByType(targetId, "license")
 
-    local player = User.find({ identifier = license })
-    if player then
-        player:update({ money = player.money + amount })
+    -- increment calcule dans MySQL (money = money + ?) : aucune ecriture concurrente n'est perdue
+    if amount and User.increment("money", amount, { identifier = license }) > 0 then
         print("Donne " .. amount .. "$ a " .. license)
     end
 end, true)
@@ -325,27 +323,51 @@ end, false)
 
 ---
 
-## Transaction callback
+## Transfert d'argent
+
+Une transaction ne verifie pas le nombre de lignes touchees entre deux requetes : un debit conditionnel qui ne trouve pas assez d'argent n'empeche pas le credit qui suit. Le transfert se fait donc en **une seule requete conditionnelle**, dont on verifie le resultat (details dans le [guide Transactions](/docs/guides/transactions#transfert-dargent)).
 
 ```lua
--- Transfert d'argent securise avec la syntaxe callback
 local function transferMoney(fromId, toId, amount)
-    local success = OrvexORM.transaction(function(tx)
-        tx:addRaw(
-            "UPDATE users SET money = money - ? WHERE identifier = ? AND money >= ?",
-            { amount, fromId, amount }
-        )
-        tx:addRaw(
-            "UPDATE users SET money = money + ? WHERE identifier = ?",
-            { amount, toId }
-        )
-    end)
+    if fromId == toId or type(amount) ~= "number" or amount <= 0 then
+        return false
+    end
 
-    if success then
+    local affected = OrvexORM.rawExec([[
+        UPDATE users AS sender
+        JOIN users AS receiver ON receiver.identifier = ?
+        SET sender.money = sender.money - ?,
+            receiver.money = receiver.money + ?
+        WHERE sender.identifier = ? AND sender.money >= ?
+    ]], { toId, amount, amount, fromId, amount })
+
+    return affected == 2  -- debiteur + crediteur modifies
+end
+
+RegisterCommand("pay", function(src, args)
+    local from = GetPlayerIdentifierByType(src, "license")
+    local to = GetPlayerIdentifierByType(tonumber(args[1]), "license")
+    local amount = math.floor(tonumber(args[2]) or 0)
+
+    if transferMoney(from, to, amount) then
         print(("Transfert de %d$ reussi"):format(amount))
     else
-        print("Transfert echoue — rien n'a ete modifie")
+        print("Transfert refuse : solde insuffisant ou joueur introuvable")
     end
+end, false)
+```
+
+## Transaction callback
+
+Pour plusieurs ecritures **inconditionnelles** qui doivent reussir ensemble :
+
+```lua
+local function resetPlayer(identifier)
+    return OrvexORM.transaction(function(tx)
+        tx:delete("vehicles", { owner = identifier })
+        tx:delete("inventories", { owner = identifier })
+        tx:update("users", { money = 500, bank = 0 }, { identifier = identifier })
+    end)
 end
 ```
 
@@ -380,14 +402,14 @@ RegisterCommand("alljobs", function()
     print("Jobs : " .. table.concat(jobs, ", "))
 end, false)
 
--- chunk : traiter par lots (utile pour les grosses tables)
+-- chunkById : traiter par lots (cout constant, meme sur une grosse table)
 RegisterCommand("resetall", function()
-    User.query():chunk(50, function(players, idx)
+    User.query():chunkById(50, function(players, idx)
         print("Traitement lot " .. idx .. " (" .. #players .. " joueurs)")
         for _, p in ipairs(players) do
             p:update({ money = 0 })
         end
-    end)
+    end, "identifier")
     print("Tous les joueurs ont ete reinitialises")
 end, true)
 ```
@@ -412,15 +434,18 @@ local User = OrvexORM.model("users", {
     },
 })
 
--- Utiliser les scopes comme methodes
-local richPlayers = User.rich():orderBy("money", "DESC"):get()
-local vipCops     = User.vip():where("job", "police"):get()
+RegisterCommand("vipcops", function()
+    -- Utiliser les scopes comme methodes
+    local richPlayers = User.rich():orderBy("money", "DESC"):get()
+    local vipCops     = User.vip():where("job", "police"):get()
 
--- Combiner avec findAll et operateurs
-local richCops = User.findAll({
-    job   = "police",
-    money = { ">", 10000 },
-})
+    -- Combiner avec findAll et operateurs
+    local richCops = User.findAll({
+        job   = "police",
+        money = { ">", 10000 },
+    })
+    print(#richPlayers, #vipCops, #richCops)
+end, true)
 ```
 
 ---

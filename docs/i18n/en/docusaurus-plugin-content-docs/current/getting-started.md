@@ -38,6 +38,76 @@ If you don't set a `primaryKey`, OrvexORM will use `id` by default.
 
 ---
 
+## Async and threads
+
+Every call that touches the database (`create`, `find`, `update`, `query():get()`, `sync()`, `migrate()`, `transaction`...) **waits for MySQL's answer**: it suspends (*yields*) the current FiveM coroutine until the result arrives. So it must run in a context that can be suspended:
+
+| Context | ORM calls? |
+|---|---|
+| `Citizen.CreateThread(function() ... end)` / `CreateThread` | Yes |
+| `AddEventHandler` / `RegisterNetEvent` handler | Yes |
+| `RegisterCommand` callback | Yes |
+| Top level of a file (`server.lua` loaded by the manifest) | **No** |
+| Defining a model, relation, scope or hook (`OrvexORM.model`, `User.hasMany`...) | Yes, anywhere: no query |
+
+Outside a thread, the call fails with an explicit message:
+
+```
+OrvexORM: database calls yield and must run inside Citizen.CreateThread, an event handler or another thread (...)
+```
+
+### Shape of a server script
+
+```lua title="server.lua"
+-- 1. Top level: definitions only (no query)
+local User = OrvexORM.model("users", {
+    identifier = "string",
+    money      = "number",
+}, { primaryKey = "identifier" })
+
+local ready = false
+
+-- 2. A startup thread: migrations / sync once, before the rest
+CreateThread(function()
+    OrvexORM.migrate()   -- or User.sync()
+    ready = true
+end)
+
+-- 3. Handlers use the models
+RegisterNetEvent("myScript:getMoney", function()
+    local src = source
+    if not ready then return end
+    local player = User.find({ identifier = GetPlayerIdentifierByType(src, "license") })
+    TriggerClientEvent("myScript:money", src, player and player.money or 0)
+end)
+```
+
+:::tip Migrations before the first queries
+Threads run concurrently: a handler can run before `migrate()` has finished. If your handlers need the tables, wait for the migrations (a flag like `ready` above, or run migrations in a resource started earlier).
+:::
+
+:::caution playerConnecting
+`playerConnecting` lets the player in as soon as the handler yields, unless you use **deferrals**. To read the database while the player connects:
+
+```lua
+AddEventHandler("playerConnecting", function(name, setKickReason, deferrals)
+    local src = source
+    deferrals.defer()
+    Wait(0)                       -- required before using deferrals
+    deferrals.update("Loading your profile...")
+
+    local license = GetPlayerIdentifierByType(src, "license")
+    local player = User.findOrCreate({ identifier = license }, { money = 500 })
+
+    deferrals.done()              -- or deferrals.done("reason") to reject
+end)
+```
+:::
+
+In the rest of the documentation, code snippets assume they run in one of these contexts.
+
+---
+
 ## Create a player
 
 To add a new player to the database:
@@ -128,31 +198,38 @@ Here's a realistic example for a FiveM server — a system that saves a player's
 ```lua
 -- server.lua
 
--- Define the model
+-- Define the model (top level: no query)
 local User = OrvexORM.model("users", {
     identifier = "string",
     money      = "number",
     job        = "string",
 }, { primaryKey = "identifier" })
 
--- When a player connects
-AddEventHandler("playerConnecting", function()
+-- Create the table at startup, in a thread
+CreateThread(function()
+    User.sync()
+end)
+
+-- When a player connects (deferrals: the connection waits for the database)
+AddEventHandler("playerConnecting", function(name, setKickReason, deferrals)
     local src = source
+    deferrals.defer()
+    Wait(0)
+
     local identifier = GetPlayerIdentifierByType(src, "license")
 
     -- Find or create the player
-    local player = User.find({ identifier = identifier })
+    local player, created = User.findOrCreate(
+        { identifier = identifier },
+        { money = 500, job = "unemployed" }
+    )
 
-    if not player then
-        player = User.create({
-            identifier = identifier,
-            money      = 500,
-            job        = "unemployed",
-        })
+    if created then
         print("New player created: " .. identifier)
     else
         print("Existing player: " .. identifier .. " with " .. player.money .. "$")
     end
+    deferrals.done()
 end)
 
 -- When a player disconnects, save their money
@@ -182,3 +259,5 @@ Now that you know the basics, you can explore the guides:
 | **[Transactions](/docs/guides/transactions)** | Execute multiple queries atomically |
 | **[Cache](/docs/guides/cache)** | Reduce SQL queries with a TTL cache |
 | **[JSON](/docs/guides/json-columns)** | Store Lua tables as JSON automatically |
+| **[Studio](/docs/guides/studio)** | Web interface to browse and edit your database |
+| **[API conventions](/docs/api/model#conventions)** | Return values, errors, argument order |

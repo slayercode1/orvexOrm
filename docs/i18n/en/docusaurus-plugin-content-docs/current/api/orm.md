@@ -7,7 +7,14 @@ sidebar_position: 1
 The main module. This is the entry point of the library.
 
 ```lua
+-- OrvexORM is a global table, in orvexorm and in every resource
+-- that includes server_script '@orvexorm/lib/import.lua'
+print(OrvexORM.version)  -- version read from orvexorm's fxmanifest.lua
 ```
+
+:::info Async
+Every function that touches the database (`transaction`, `migrate`, `rollback`, `raw`, `rawExec`, `seed` depending on its content, `introspect`, `fromTable`) waits for MySQL's answer: call them from a thread, an event or a command. See [Async and threads](/docs/getting-started#async-and-threads). `model`, `enableCache`, `debug`, `setAdapter`, `migrations` and `schema` run no query.
+:::
 
 ---
 
@@ -28,6 +35,13 @@ Creates a new model linked to a MySQL table.
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `primaryKey` | `string` | `"id"` | Name of the primary key column |
+| `timestamps` | `boolean` | `false` | Fills `created_at` / `updated_at`; these columns are accepted even if they are not in `fields` |
+| `softDelete` | `boolean` | `false` | `delete()` fills `deleted_at` instead of deleting; reads exclude those rows |
+| `hooks` | `table` | `nil` | One hook per event: `{ beforeCreate = fn, afterBulkUpdate = fn, ... }` (see [Hooks](/docs/api/model#hooks-lifecycle)) |
+| `scopes` | `table` | `nil` | Reusable filters: `{ rich = function(b) b:where(...) end }`, callable as `User.rich()` |
+| `relations` | `function` | `nil` | `function(M) M.hasMany(...) end`, run by `Model.applyRelations()` |
+| `adapter` | `OrvexAdapter` | default adapter | Adapter of this model (another database, a test driver...) |
+| `cache` | `OrvexCache` | global cache | Cache of this model only (see [Cache](/docs/guides/cache#one-cache-per-model)) |
 
 ### Available field types
 
@@ -37,6 +51,9 @@ Creates a new model linked to a MySQL table.
 | `"number"` | Number |
 | `"boolean"` | True/false |
 | `"json"` | Lua table automatically converted to JSON |
+| `"date"` | Date (`"2024-03-15"`) |
+| `"datetime"` | Date and time (`"2024-03-15 14:30:00"`) |
+| `"timestamp"` | Timestamp (`"2024-03-15 14:30:00"`) |
 | `"auto"` | Automatic detection (table → JSON, JSON string → table) |
 
 ### Return
@@ -57,21 +74,20 @@ local User = OrvexORM.model("users", {
 
 ---
 
-## `ORM.transaction(adapter?)`
+## `ORM.transaction(fn, adapter?)` / `ORM.transaction(adapter?)`
 
-Creates a new transaction builder to execute multiple queries atomically.
+Creates a new transaction builder, or runs a transactional callback with auto-commit. Only `tx:*` methods are part of the transaction; read the [Transactions guide](/docs/guides/transactions) before writing a conditional operation (transfer, purchase).
 
-### Parameters
+### Callback mode (recommended)
 
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `adapter` | `OrvexAdapter` | No | Custom adapter (uses the default otherwise) |
+```lua
+local success = OrvexORM.transaction(function(tx)
+    tx:insert("users", { identifier = "license:abc", money = 500 })
+    tx:update("vehicles", { owner = "license:abc" }, { plate = "ABC123" })
+end) -- auto-commit!
+```
 
-### Return
-
-`OrvexTransaction` — A transaction object with the methods `insert`, `update`, `delete`, `upsert`, `addRaw`, `commit`.
-
-### Example
+### Builder mode
 
 ```lua
 local tx = OrvexORM.transaction()
@@ -80,17 +96,33 @@ tx:update("vehicles", { owner = "license:abc" }, { plate = "ABC123" })
 local success = tx:commit()
 ```
 
+### Parameters
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `fn` | `function` | No | Callback receiving the transaction builder. If given, auto-commit at the end. If it raises an error, nothing is sent and the error propagates. |
+| `adapter` | `OrvexAdapter` | No | Custom adapter (the default one otherwise). In callback mode it is the **2nd** argument: `ORM.transaction(fn, adapter)`. |
+
+### Return
+
+- Callback mode: `boolean` — `true` if the transaction succeeded. Depending on the driver, a failure can also raise an error (see [commit](/docs/guides/transactions#txcommit--boolean)).
+- Builder mode: `OrvexTransaction` — A transaction object with the `insert`, `update`, `delete`, `upsert`, `addRaw`, `getQueries`, `commit` methods
+
+After a successful commit, the global cache is invalidated for every table written.
+
 ---
 
 ## `ORM.enableCache(opts?)`
 
-Enables the global cache with an optional TTL.
+Enables the global cache with an optional TTL. The global cache holds at most **1000 entries**; beyond that, the least recently read ones are evicted (LRU). For another limit, give a model its own cache (`opts.cache`).
 
 ### Parameters
 
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `ttl` | `number` | `60` | Time to live in seconds |
+
+The cache lives in the resource that enables it: with `lib/import.lua`, each resource has its own.
 
 ### Example
 
@@ -126,14 +158,13 @@ Returns global cache statistics.
 
 ### Return
 
-`table` — `{ hits, misses, hitRate, entries }`
-
 | Field | Type | Description |
 |---|---|---|
-| `hits` | `number` | Number of cache hits |
-| `misses` | `number` | Number of cache misses |
-| `hitRate` | `number` | Hit ratio (`hits / (hits + misses)`) |
+| `hits` | `number` | Number of reads served from the cache |
+| `misses` | `number` | Number of reads that queried the database |
+| `hitRate` | `number` | Ratio hits / (hits + misses) |
 | `entries` | `number` | Number of entries currently in the cache |
+| `maxEntries` | `number` | Maximum cache size (1000 for the global cache) |
 
 ### Example
 
@@ -147,11 +178,41 @@ print(("Cache: %d hits, %d misses (%.0f%% hit rate), %d entries")
 
 ## `ORM.setAdapter(adapter)`
 
-Replaces the default database adapter.
+Replaces the default database adapter (used by models created **after** the call, transactions, `raw`, `rawExec` and migrations). An adapter is built with the global `OrvexAdapter` class, available in orvexorm and in every resource that uses `lib/import.lua`:
 
 ```lua
-OrvexORM.setAdapter(Adapter.new(MyDriver.new()))
+local MyDriver = {}
+MyDriver.__index = MyDriver
+
+function MyDriver:execute(sql, params)   -- SELECT: returns a list of rows
+    return exports.oxmysql:executeSync(sql, params) or {}
+end
+
+function MyDriver:scalar(sql, params)    -- INSERT: inserted id; UPDATE / DELETE: affected rows
+    if sql:match("^%s*[Ii][Nn][Ss][Ee][Rr][Tt]") then
+        return exports.oxmysql:insertSync(sql, params)
+    end
+    return exports.oxmysql:updateSync(sql, params)
+end
+
+function MyDriver:transaction(queries)   -- optional: { { query = "...", values = {...} }, ... }
+    return exports.oxmysql:transactionSync(queries) == true
+end
+
+OrvexORM.setAdapter(OrvexAdapter.new(setmetatable({}, MyDriver)))
 ```
+
+### Driver contract
+
+| Method | Required | Receives | Returns |
+|---|---|---|---|
+| `driver:execute(sql, params)` | Yes | query and parameter array | `table[]`: the rows (`{}` if none) |
+| `driver:scalar(sql, params)` | Yes | write query | `INSERT`: the inserted id; `UPDATE`/`DELETE`: the affected row count (`number` or `{ affectedRows = n }`) |
+| `driver:transaction(queries)` | No | `{ { query, values }, ... }` | `boolean`: `true` if everything was applied |
+
+Without `transaction`, the adapter runs the queries one by one and **is not atomic**: a failing query does not roll back the previous ones. Driver methods may *yield* (`Citizen.Await`).
+
+The shipped driver is `OrvexMySQLDriver` (`OrvexAdapter.new(OrvexMySQLDriver.new())`), see [MySQL driver](/docs/installation#mysql-driver).
 
 ---
 
@@ -189,7 +250,7 @@ OrvexORM.migrations({
 
 ## `ORM.migrate(adapter?)`
 
-Runs all pending migrations.
+Runs all pending migrations, in order. **On the first failing migration**, it is not recorded, the following ones are not run, and an error is raised: `[OrvexORM] Migration of migration '<name>' failed (N migration(s) applied before it): <driver error>`. A statement for which the driver returns `nil` counts as a failure.
 
 ### Parameters
 
@@ -199,20 +260,30 @@ Runs all pending migrations.
 
 ### Return
 
-`number` — The number of applied migrations.
+`number` — The number of migrations applied.
 
 ### Example
 
 ```lua
-local count = OrvexORM.migrate()
-print(count .. " migration(s) applied")
+CreateThread(function()
+    local ok, result = pcall(OrvexORM.migrate)
+    if ok then
+        print(result .. " migration(s) applied")
+    else
+        print("^1Migration failed: " .. tostring(result) .. "^0")
+    end
+end)
 ```
+
+:::caution DDL is not transactional
+MySQL commits each `CREATE` / `ALTER` immediately: if a migration has several statements and the 3rd one fails, the first 2 stay applied. Fix the database by hand or write single-statement migrations.
+:::
 
 ---
 
 ## `ORM.rollback(adapter?)`
 
-Rolls back the last batch of migrations.
+Rolls back the last batch of migrations (newest first). If a `down` fails, its migration stays recorded and an error is raised, as with `migrate()`.
 
 ### Parameters
 
@@ -222,40 +293,45 @@ Rolls back the last batch of migrations.
 
 ### Return
 
-`number` — The number of rolled back migrations.
+`number` — The number of migrations rolled back.
 
 ### Example
 
 ```lua
-local count = OrvexORM.rollback()
-print(count .. " migration(s) rolled back")
+CreateThread(function()
+    local count = OrvexORM.rollback()
+    print(count .. " migration(s) rolled back")
+end)
 ```
 
 ---
 
 ## `ORM.raw(sql, params?)`
 
-Executes a raw SQL query (SELECT) and returns the rows.
+Runs a raw SQL query (SELECT) and returns the rows (`{}` if none). The rows are plain tables, not instances.
 
 ```lua
 local rows = OrvexORM.raw("SELECT * FROM users WHERE money > ?", { 1000 })
 ```
 
+If the query writes (`INSERT`, `UPDATE`, `DELETE`...), the global cache is invalidated for the written table, or flushed entirely when the table cannot be told (joins, complex subqueries).
+
 ---
 
 ## `ORM.rawExec(sql, params?)`
 
-Executes a raw SQL query (INSERT/UPDATE/DELETE).
+Runs a raw SQL query (INSERT/UPDATE/DELETE) and returns what the driver returns: the inserted id for an `INSERT`, the affected row count for an `UPDATE` / `DELETE`. Invalidates the global cache like `ORM.raw`.
 
 ```lua
-OrvexORM.rawExec("UPDATE users SET money = money + ? WHERE job = ?", { 100, "police" })
+local affected = OrvexORM.rawExec("UPDATE users SET money = money + ? WHERE job = ?", { 100, "police" })
+print(affected .. " officer(s) paid")
 ```
 
 ---
 
 ## `ORM.debug(enabled)`
 
-Enables or disables debug mode. When enabled, all SQL queries are printed to the console.
+Enables or disables debug mode. When enabled, all SQL queries are printed in the console.
 
 ```lua
 OrvexORM.debug(true)   -- Enable SQL logs
@@ -269,10 +345,12 @@ OrvexORM.debug(false)  -- Disable logs
 Runs a seed function to populate the database with initial data.
 
 ```lua
-OrvexORM.seed(function(orm)
-    local User = orm.model("users", { identifier = "string", money = "number" })
-    User.create({ identifier = "license:admin", money = 99999 })
-    User.create({ identifier = "license:test", money = 500 })
+CreateThread(function()
+    OrvexORM.seed(function(orm)
+        local User = orm.model("users", { identifier = "string", money = "number" })
+        User.create({ identifier = "license:admin", money = 99999 })
+        User.create({ identifier = "license:test", money = 500 })
+    end)
 end)
 ```
 
@@ -280,7 +358,7 @@ end)
 
 ## `ORM.introspect(tableName, adapter?)`
 
-Analyzes an existing MySQL table and returns its field definition and primary key. Uses `DESCRIBE` internally.
+Analyzes an existing MySQL table and returns its field definitions and primary key. Uses `DESCRIBE` internally.
 
 ### Parameters
 
@@ -295,13 +373,15 @@ Analyzes an existing MySQL table and returns its field definition and primary ke
 
 ### MySQL type mapping
 
-| MySQL Type | OrvexORM Type |
+| MySQL type | OrvexORM type |
 |---|---|
 | `int`, `bigint`, `float`, `double`, `decimal` | `"number"` |
 | `varchar`, `char`, `text`, `enum` | `"string"` |
 | `tinyint(1)` | `"boolean"` |
 | `json` | `"json"` |
-| `datetime`, `timestamp`, `date` | `"string"` |
+| `date` | `"date"` |
+| `datetime` | `"datetime"` |
+| `timestamp` | `"timestamp"` |
 
 ### Example
 
@@ -325,4 +405,27 @@ local User = OrvexORM.fromTable("users")
 -- Equivalent to:
 -- local fields, pk = OrvexORM.introspect("users")
 -- local User = OrvexORM.model("users", fields, { primaryKey = pk })
+```
+
+---
+
+## `ORM.unpack()`
+
+Returns the most common functions to avoid repeating `OrvexORM.` everywhere.
+
+### Return
+
+`function, function, function, function` — `model`, `raw`, `migrate`, `transaction` (typed for LuaLS: each function keeps the signature of `OrvexORM.*`)
+
+### Example
+
+```lua
+local model, raw, migrate, transaction = OrvexORM.unpack()
+
+local User = model("users", { identifier = "string", money = "number" })
+
+CreateThread(function()
+    migrate()
+    local rows = raw("SELECT * FROM logs")
+end)
 ```

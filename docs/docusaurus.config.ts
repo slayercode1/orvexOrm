@@ -1,6 +1,7 @@
 import {themes as prismThemes} from 'prism-react-renderer';
 import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
+import {readOrvexVersion} from './scripts/orvex-version';
 
 const config: Config = {
   title: 'OrvexORM',
@@ -56,7 +57,7 @@ const config: Config = {
           lastVersion: 'current',
           versions: {
             current: {
-              label: '1.2.1',
+              label: readOrvexVersion(),
               badge: true,
             },
           },

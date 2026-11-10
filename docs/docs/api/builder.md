@@ -10,6 +10,15 @@ Le Query Builder te permet de construire des requetes complexes en chainant des 
 local builder = User.query()
 ```
 
+:::info Identifiants et valeurs
+- Les **valeurs** passent toujours par des parametres `?` : jamais concatenees au SQL.
+- Les **noms** de colonnes et de tables sont valides (lettres, chiffres, `_` et `.` uniquement, sinon `Invalid SQL identifier`) puis entoures de backticks : `` `group` ``, `` `users`.`money` ``. Les mots reserves de MySQL (`group`, `key`, `order`, `rank`...) sont donc utilisables comme noms de colonnes.
+- Les operateurs sont limites a `=`, `!=`, `<>`, `>`, `<`, `>=`, `<=`, `LIKE`, `NOT LIKE`, `IN`, `NOT IN`, `BETWEEN`, `IS`, `IS NOT`.
+- `:whereRaw()`, `:having()`, `:whereExists()`, `:whereInSub()` et `:whereNotInSub()` sont inseres **tels quels** : n'y mets jamais de donnees du joueur, passe-les en parametres. `:whereIn()` / `:whereNotIn()` n'acceptent qu'un tableau, toujours lie en parametres : une chaine (par exemple un payload d'event client mal forme) leve une erreur au lieu d'etre inseree comme sous-requete.
+
+Un modele avec `softDelete` ajoute le filtre `deleted_at IS NULL` comme une **contrainte** : elle est toujours combinee en `AND` devant tes conditions, qu'un `orWhere` ne peut pas contourner.
+:::
+
 ---
 
 ## Methodes chainables
@@ -29,8 +38,10 @@ Ajoute une condition WHERE (reliee par AND).
 -- 2. Raccourci egalite (2 arguments, = implicite)
 :where("job", "police")
 
--- 3. Avec operateur (3 arguments)
+-- 3. Avec operateur (3 arguments), y compris IN / BETWEEN / IS
 :where("money", ">", 1000)
+:where("id", "IN", { 1, 2, 3 })
+:where("money", "BETWEEN", { 500, 5000 })
 
 -- 4. Operateur dans la table
 :where({ money = { ">", 1000 } })
@@ -46,28 +57,50 @@ Ajoute une condition WHERE (reliee par AND).
 `:where("job", "police")` est equivalent a `:where({ job = "police" })`. C'est plus court quand tu n'as qu'une seule condition.
 :::
 
+:::caution Valeur `nil`
+`:where("job", nil)` ou `:where("job", "=", nil)` leve une erreur (`value is nil, use whereNull() / whereNotNull()`) au lieu de generer une condition silencieusement fausse. Utilise `:whereNull("job")`. Dans la forme table, une cle a `nil` n'existe pas en Lua et est donc ignoree.
+:::
+
 ---
 
 ### `:orWhere(conditions)`
 
-Ajoute une condition reliee par OR.
+Ajoute une condition reliee par OR. Memes formes que `:where()`.
 
 ```lua
 :where({ job = "police" })
 :orWhere({ job = "medic" })
--- SQL: WHERE job = ? OR job = ?
+-- SQL: WHERE `job` = ? OR `job` = ?
+
+-- Sur un modele avec softDelete, tes conditions sont groupees apres le filtre :
+-- WHERE `deleted_at` IS NULL AND (`job` = ? OR `job` = ?)
+```
+
+:::caution Priorite de AND / OR
+Tes conditions sont jointes dans l'ordre ou tu les ajoutes, et MySQL evalue `AND` avant `OR` : `:where(a):where(b):orWhere(c)` donne `a AND b OR c`, c'est-a-dire `(a AND b) OR c`. Pour un autre groupement, ecris-le avec `:whereRaw("(job = ? OR job = ?)", { "police", "medic" })`.
+:::
+
+---
+
+### `:whereColumn(first, operator?, second)`
+
+Compare deux colonnes (sans parametre).
+
+```lua
+:whereColumn("updated_at", ">", "created_at")
+:whereColumn("users.identifier", "vehicles.owner")  -- = implicite
 ```
 
 ---
 
 ### `:orderBy(column, direction?)`
 
-Trie les resultats.
+Trie les resultats. Un seul tri a la fois : un nouvel appel remplace le precedent.
 
 | Parametre | Type | Defaut | Description |
 |---|---|---|---|
 | `column` | `string` | — | Colonne de tri |
-| `direction` | `"ASC" \| "DESC"` | `"ASC"` | Sens du tri |
+| `direction` | `"ASC" \| "DESC"` | `"ASC"` | Sens du tri (insensible a la casse ; toute autre valeur leve une erreur) |
 
 ```lua
 :orderBy("money", "DESC")
@@ -119,7 +152,7 @@ Trie par la colonne donnee en ASC. Defaut : `"created_at"`.
 
 ### `:limit(n)`
 
-Limite le nombre de resultats.
+Limite le nombre de resultats. `n` doit etre un entier >= 0 (un nombre entier ou une chaine numerique comme `"10"`) ; toute autre valeur leve une erreur, si bien qu'une saisie du joueur ne peut jamais atteindre le SQL.
 
 ```lua
 :limit(10)
@@ -129,7 +162,7 @@ Limite le nombre de resultats.
 
 ### `:offset(n)`
 
-Saute les N premiers resultats (pour la pagination).
+Saute les N premiers resultats (pour la pagination). Memes regles que `:limit()`. Fonctionne aussi sans `:limit()`.
 
 ```lua
 :offset(20)
@@ -139,11 +172,12 @@ Saute les N premiers resultats (pour la pagination).
 
 ### `:select(columns)`
 
-Specifie les colonnes a selectionner (defaut: `"*"`).
+Specifie les colonnes a selectionner (defaut: `"*"`), sous forme de **chaine** separee par des virgules (alors que `opts.select` de `find` prend un tableau). Les noms simples (`money`, `users.money`, `users.*`) sont echappes ; les expressions (`COUNT(*) AS nb`, `SUM(money) AS total`) sont gardees telles quelles : ne construis jamais cette chaine avec une saisie du joueur.
 
 ```lua
 :select("identifier, money")
 :select("users.*, profiles.bio")
+:select("job, COUNT(*) AS nb")
 ```
 
 ---
@@ -233,31 +267,45 @@ Filtre les lignes ou la colonne n'est pas NULL.
 
 ---
 
-### `:whereIn(column, valuesOrSubSQL, params?)`
+### `:whereIn(column, values)`
 
-Filtre avec une liste de valeurs OU une sous-requete IN.
+Filtre avec une liste de valeurs, liees en parametres. Une liste vide leve une erreur (`whereIn requires a non-empty array`) : teste `#values > 0` avant d'appeler. Tout autre type qu'un tableau leve une erreur : pour une sous-requete, utilise `:whereInSub()`.
 
 ```lua
--- Avec un tableau de valeurs
 :whereIn("job", { "police", "medic", "fire" })
 -- SQL: WHERE job IN (?, ?, ?)
+```
 
--- Avec une sous-requete
-:whereIn("id", "SELECT user_id FROM active_users WHERE last_login > ?", { "2024-01-01" })
+---
+
+### `:whereNotIn(column, values)`
+
+Filtre avec NOT IN (tableau uniquement, comme `:whereIn()`).
+
+```lua
+:whereNotIn("id", { 1, 2, 3 })
+-- SQL: WHERE id NOT IN (?, ?, ?)
+```
+
+---
+
+### `:whereInSub(column, subSQL, params?)`
+
+Filtre avec une sous-requete IN. `subSQL` est insere tel quel : passe les valeurs dans `params`.
+
+```lua
+:whereInSub("id", "SELECT user_id FROM active_users WHERE last_login > ?", { "2024-01-01" })
 -- SQL: WHERE id IN (SELECT user_id FROM active_users WHERE last_login > ?)
 ```
 
 ---
 
-### `:whereNotIn(column, valuesOrSubSQL, params?)`
+### `:whereNotInSub(column, subSQL, params?)`
 
-Filtre avec NOT IN (tableau ou sous-requete).
+Filtre avec une sous-requete NOT IN.
 
 ```lua
-:whereNotIn("id", { 1, 2, 3 })
--- SQL: WHERE id NOT IN (?, ?, ?)
-
-:whereNotIn("id", "SELECT user_id FROM banned_users")
+:whereNotInSub("id", "SELECT user_id FROM banned_users")
 -- SQL: WHERE id NOT IN (SELECT user_id FROM banned_users)
 ```
 
@@ -327,12 +375,15 @@ Passe **toujours** les valeurs via `params`, jamais par concatenation de chaine.
 
 ### `:after(column, value, direction?)`
 
-Pagination par curseur : recupere les lignes apres une valeur donnee.
+Pagination par curseur : recupere les lignes apres une valeur donnee, et trie sur la colonne. `direction` vaut `"ASC"` (defaut) ou `"DESC"` ; en `DESC`, "apres" signifie "plus petit".
 
 ```lua
 -- Recuperer les 10 joueurs apres l'ID 50
 User.query():after("id", 50):limit(10):get()
--- SQL: WHERE id > 50 ORDER BY id ASC LIMIT 10
+-- SQL: WHERE `id` > ? ORDER BY `id` ASC LIMIT 10
+
+User.query():after("id", 50, "DESC"):limit(10):get()
+-- SQL: WHERE `id` < ? ORDER BY `id` DESC LIMIT 10
 ```
 
 ---
@@ -343,14 +394,14 @@ Pagination par curseur : recupere les lignes avant une valeur donnee.
 
 ```lua
 User.query():before("id", 50):limit(10):get()
--- SQL: WHERE id < 50 ORDER BY id ASC LIMIT 10
+-- SQL: WHERE `id` < ? ORDER BY `id` ASC LIMIT 10
 ```
 
 ---
 
 ## Methodes terminales
 
-Ces methodes **executent** la requete et retournent un resultat.
+Ces methodes **executent** la requete et retournent un resultat. Elles attendent la base : appelle-les depuis un thread, un event ou une commande ([Async et threads](/docs/getting-started#async-et-threads)).
 
 ### `:get()` → `OrvexInstance[]`
 
@@ -379,7 +430,7 @@ local richest = User.query()
 
 ### `:count()` → `integer`
 
-Compte les lignes.
+Compte les lignes que la requete retournerait, en ignorant `orderBy`, `limit` et `offset`. Avec `:distinct()`, `:groupBy()` ou `:having()`, la requete est comptee comme une table derivee : `count()` retourne le nombre de lignes distinctes ou de groupes, pas le nombre de lignes brutes. Avec la selection par defaut (`*`), la table derivee selectionne les colonnes du `groupBy`, ou sinon `table.*` de la table principale, pour eviter les noms de colonnes en double d'une jointure.
 
 ```lua
 local nb = User.query()
@@ -433,7 +484,7 @@ local max = User.query():max("money")
 
 ### `:pluck(column)` → `any[]`
 
-Retourne un tableau des valeurs d'une seule colonne.
+Retourne un tableau des valeurs d'une seule colonne. Une colonne qualifiee (`"users.job"`) fonctionne aussi.
 
 ```lua
 local jobs = User.query():pluck("job")
@@ -454,7 +505,7 @@ local hasCops = User.query():where("job", "police"):exists()
 
 ### `:chunk(size, callback)`
 
-Traite les resultats par lots pour eviter de tout charger en memoire.
+Traite les resultats par lots avec `LIMIT` / `OFFSET`, pour eviter de tout charger en memoire. La callback recoit `(rows, chunkIndex)` ; retourner `false` arrete le parcours. Les lots ne sont pas mis en cache.
 
 ```lua
 User.query():chunk(100, function(rows, chunkIndex)
@@ -463,11 +514,35 @@ User.query():chunk(100, function(rows, chunkIndex)
 end)
 ```
 
+:::caution Prefere `chunkById` sur les grosses tables
+Avec `OFFSET`, MySQL relit toutes les lignes precedentes a chaque lot : le cout grandit avec la table. Et si la callback modifie les lignes de facon qu'elles ne correspondent plus au filtre (ou les supprime), les lots suivants **sautent des lignes**.
+:::
+
+---
+
+### `:chunkById(size, callback, column?)`
+
+Traite par lots en pagination **keyset** : `WHERE column > dernierCle ORDER BY column LIMIT size`. Cout constant par lot quelle que soit la taille de la table, et aucune ligne sautee si la callback modifie ou supprime les lignes du lot.
+
+| Parametre | Type | Defaut | Description |
+|---|---|---|---|
+| `size` | `integer` | — | Taille d'un lot (>= 1) |
+| `callback` | `function(rows, chunkIndex)` | — | Retourner `false` arrete le parcours |
+| `column` | `string` | `"id"` | Colonne **unique** et presente dans les colonnes selectionnees (souvent la cle primaire) |
+
+```lua
+User.query():where("job", "police"):chunkById(200, function(cops)
+    for _, cop in ipairs(cops) do cop:update({ money = 0 }) end
+end, "identifier")
+```
+
+Le tri du builder est remplace par celui de `column`.
+
 ---
 
 ### `:paginate(page, perPage?)` → `table`
 
-Pagine les resultats automatiquement. Retourne un objet avec les donnees et les metadonnees de pagination.
+Pagine les resultats automatiquement (2 requetes : un `count()` et la page). Retourne un objet avec les donnees et les metadonnees de pagination. Le total est juste aussi avec `distinct`, `groupBy` et `having`. `page` et `perPage` doivent etre des entiers >= 1.
 
 | Parametre | Type | Defaut | Description |
 |---|---|---|---|
@@ -499,8 +574,20 @@ local sql, params = User.query()
     :where("money", ">", 500)
     :toSQL()
 
-print(sql)     -- SELECT * FROM users WHERE job = ? AND money > ?
+print(sql)     -- SELECT * FROM `users` WHERE `job` = ? AND `money` > ?
 print(params)  -- { "police", 500 }
+```
+
+---
+
+### `:clone()` → `OrvexBuilder`
+
+Retourne une copie independante du builder : les conditions ajoutees a la copie n'affectent pas l'original.
+
+```lua
+local cops = User.query():where("job", "police")
+local richCops = cops:clone():where("money", ">", 10000)
+print(cops:count(), richCops:count())
 ```
 
 ---

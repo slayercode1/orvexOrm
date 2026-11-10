@@ -21,6 +21,12 @@ local User = ORM.model("users", {
 }, { primaryKey = "identifier" })
 ```
 
+:::info Avant de commencer
+- Tous ces appels attendent la base : ils doivent tourner dans un thread, un event ou une commande ([Async et threads](/docs/getting-started#async-et-threads)).
+- Les ecritures (`update`, `delete`, `increment`...) retournent le **nombre de lignes touchees** (`0` = rien n'a change).
+- Le SQL montre ici est simplifie : en vrai, chaque nom de colonne et de table est entre backticks (`` `users`.`money` ``), ce qui permet d'utiliser des mots reserves comme `group` ou `key` comme noms de colonnes.
+:::
+
 ---
 
 ## Create — Creer
@@ -39,6 +45,8 @@ local player = User.create({
 -- "player" est une instance, tu peux l'utiliser directement
 print(player.money)  -- 500
 ```
+
+Ta table `data` n'est pas modifiee : l'ORM travaille sur une copie (tu peux reutiliser un meme modele de donnees pour plusieurs `create`). Avec une cle primaire auto-increment, l'instance recoit l'id genere.
 
 **SQL genere :**
 ```sql
@@ -80,7 +88,7 @@ Avec `timestamps = true`, `created_at` n'est pas reecrase quand la ligne existe 
 
 ### `Model.find(where)`
 
-Cherche **une seule** ligne correspondant aux conditions et retourne une instance (ou `nil`).
+Cherche **une seule** ligne correspondant aux conditions et retourne une instance (ou `nil`). La requete porte un `LIMIT 1`.
 
 ```lua
 local player = User.find({ identifier = "license:abc" })
@@ -95,12 +103,12 @@ end
 
 **SQL genere :**
 ```sql
-SELECT * FROM users WHERE identifier = ?
+SELECT * FROM users WHERE identifier = ? LIMIT 1
 ```
 
-### `Model.findAll(where)`
+### `Model.findAll(where?)`
 
-Cherche **toutes les lignes** correspondant aux conditions et retourne une liste.
+Cherche **toutes les lignes** correspondant aux conditions et retourne une liste. Sans argument, `User.findAll()` retourne toute la table (comme `User.all()`).
 
 ```lua
 local cops = User.findAll({ job = "police" })
@@ -119,7 +127,7 @@ SELECT * FROM users WHERE job = ?
 
 ### `Model.findAll` avec des operateurs
 
-Tu peux utiliser des operateurs directement dans `findAll()`, comme dans le query builder :
+Tu peux utiliser des operateurs directement dans `find()` et `findAll()`, comme dans le query builder :
 
 ```lua
 -- Policiers avec plus de 1000$
@@ -184,15 +192,20 @@ UPDATE users SET job = ?, money = ? WHERE identifier = ?
 
 ### Classe : `User.update(data, where)`
 
-Modifie des lignes **sans les chercher d'abord**. Plus rapide si tu n'as pas besoin de lire les donnees.
+Modifie des lignes **sans les chercher d'abord**. Plus rapide si tu n'as pas besoin de lire les donnees. Attention a l'ordre : **les donnees d'abord, le `where` ensuite** (`updateWhere` prend l'ordre inverse).
 
 ```lua
 -- Mettre tous les chomeurs a 0$
-User.update({ money = 0 }, { job = "unemployed" })
+local n = User.update({ money = 0 }, { job = "unemployed" })
+print(n .. " joueur(s) modifie(s)")
 
 -- Changer le job d'un joueur specifique
-User.update({ job = "medic" }, { identifier = "license:abc" })
+if User.update({ job = "medic" }, { identifier = "license:abc" }) == 0 then
+    print("Joueur introuvable")
+end
 ```
+
+Le `where` est obligatoire et ne doit pas etre vide : `User.update({ money = 0 }, {})` leve une erreur, pour ne jamais modifier toute la table par accident. Les hooks `beforeBulkUpdate` / `afterBulkUpdate` sont declenches (pas `beforeUpdate`, qui recoit une instance).
 
 **SQL genere :**
 ```sql
@@ -231,11 +244,11 @@ DELETE FROM users WHERE identifier = ?
 
 ### Classe : `User.delete(where)`
 
-Supprime des lignes **par condition**, sans les chercher d'abord.
+Supprime des lignes **par condition**, sans les chercher d'abord. Retourne le nombre de lignes supprimees et declenche `beforeBulkDelete` / `afterBulkDelete`.
 
 ```lua
 -- Supprimer tous les chomeurs
-User.delete({ job = "unemployed" })
+local n = User.delete({ job = "unemployed" })
 ```
 
 **SQL genere :**
@@ -246,8 +259,6 @@ DELETE FROM users WHERE job = ?
 :::caution Attention aux suppressions en masse
 `User.delete({ job = "unemployed" })` supprime **toutes** les lignes qui correspondent. Verifie bien ta condition avant de lancer une suppression en masse.
 :::
-
----
 
 ---
 
@@ -321,7 +332,7 @@ end
 ### `updateWhere` / `deleteWhere` — Alias lisibles
 
 ```lua
--- Plus lisible que User.update(data, where)
+-- Meme chose que User.update(data, where), mais le where d'abord
 User.updateWhere({ identifier = "license:abc" }, { money = 9999 })
 
 -- Plus lisible que User.delete(where)
@@ -372,11 +383,16 @@ User.createMany({
 User.increment("money", 100, { identifier = "license:abc" })
 User.decrement("money", 50, { identifier = "license:abc" })
 
--- Sur l'instance : modifier un joueur qu'on a deja
+-- Sur l'instance : modifier un joueur qu'on a deja (amount = 1 par defaut)
 player:increment("money", 100)
 player:decrement("money", 50)
--- SQL: UPDATE users SET money = money + 100 WHERE identifier = ?
+player:increment("kills")
+-- SQL: UPDATE users SET money = money + ? WHERE identifier = ?
 ```
+
+:::tip Prefere increment a update pour les compteurs
+`player:update({ money = player.money + 100 })` ecrit une valeur calculee a partir d'une lecture : si une autre ecriture a eu lieu entre-temps, elle est ecrasee. `increment` fait le calcul dans MySQL (`money = money + ?`) et ne perd rien. Sur la classe, `amount` est **obligatoire** : `User.increment("money", 100, where)`.
+:::
 
 ---
 
@@ -392,7 +408,7 @@ player:forceDelete()     -- Supprime vraiment
 player:restore()         -- Restaure (remet deleted_at a NULL)
 ```
 
-Les queries `find`, `findAll` et `query()` excluent automatiquement les lignes supprimees.
+Les queries `find`, `findAll`, `first`, `count` et `query()` excluent automatiquement les lignes supprimees, y compris quand tu combines des `orWhere` (le filtre reste toujours applique). Pour lire une ligne supprimee avec `find`, mets une condition explicite sur `deleted_at`, ou utilise `withTrashed()`.
 
 ```lua
 User.withTrashed():get()    -- Inclure les supprimes
@@ -415,6 +431,8 @@ p:update({ money = 1000 })
 -- updated_at est mis a jour automatiquement
 ```
 
+Tu n'as pas besoin de declarer `created_at` / `updated_at` (ni `deleted_at` avec `softDelete`) dans les champs du modele : la validation les accepte quand l'option est active. Les dates sont ecrites en UTC, au format `AAAA-MM-JJ HH:MM:SS`.
+
 ---
 
 ## Recapitulatif
@@ -434,8 +452,8 @@ p:update({ money = 1000 })
 | Lire tout | `User.all(opts?)` | — |
 | Existe ? | `User.exists(where)` | — |
 | Extraire colonne | `User.pluck(col, where?)` | — |
-| Modifier | `User.update(data, where)` | `player:update(data)` |
-| Modifier (alias) | `User.updateWhere(where, data)` | — |
+| Modifier | `User.update(data, where)` → lignes touchees | `player:update(data)` |
+| Modifier (alias, where d'abord) | `User.updateWhere(where, data)` | — |
 | Supprimer | `User.delete(where)` | `player:delete()` |
 | Supprimer (alias) | `User.deleteWhere(where)` | — |
 | Supprimer (force) | `User.forceDelete(where)` | `player:forceDelete()` |
@@ -444,3 +462,4 @@ p:update({ money = 1000 })
 | Decrementer | `User.decrement(col, n, where)` | `player:decrement(col, n)` |
 | Recharger | — | `player:refresh()` |
 | Convertir en table | — | `player:toTable()` |
+| Lire une colonne nommee comme une methode | — | `player:getAttribute(col)` |

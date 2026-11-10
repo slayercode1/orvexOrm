@@ -56,6 +56,12 @@ Une **foreignKey** (cle etrangere), c'est une colonne qui fait le lien entre deu
 Par exemple, dans la table `vehicles`, la colonne `owner_id` contient l'identifiant du joueur. C'est la foreignKey qui lie un vehicule a son proprietaire.
 :::
 
+:::info Regles communes a toutes les relations
+- Declarer une relation (`User.hasMany(...)`) ne fait aucune requete : tu peux le faire au niveau superieur du script. La charger (`:get()`, `include`, `whereHas`) attend la base : dans un thread, un event ou une commande.
+- Si la cle de liaison vaut `nil` (par exemple un vehicule sans `owner_id`), aucune requete n'est faite : `nil` pour `hasOne` / `belongsTo`, `{}` pour `hasMany` / `belongsToMany`.
+- Si le modele lie a `softDelete = true`, ses lignes supprimees en douceur sont exclues partout : `:get()`, `include`, `whereHas` et `countByRelation`.
+:::
+
 ---
 
 ## hasOne (Un a Un)
@@ -319,7 +325,13 @@ SELECT * FROM vehicles WHERE owner_id IN (?, ?, ?)
 ```
 
 :::info belongsToMany
-Le chargement batche fonctionne pour `hasOne`, `hasMany` et `belongsTo`. Les relations `belongsToMany` retombent sur un chargement par instance (une requete par resultat).
+Le chargement batche fonctionne pour les 4 types de relations. Pour `belongsToMany`, une seule jointure sur la table pivot charge les lignes liees de tous les parents :
+
+```sql
+SELECT roles.*, user_roles.user_id FROM roles
+INNER JOIN user_roles ON user_roles.role_id = roles.id
+WHERE user_roles.user_id IN (?, ?, ?)
+```
 :::
 
 ---
@@ -350,11 +362,13 @@ SELECT * FROM users WHERE EXISTS (
 )
 ```
 
+La condition de liaison est une contrainte : un `orWhere` dans la callback reste groupe avec elle (`liaison AND (cond1 OR cond2)`) et ne peut pas faire correspondre des vehicules d'autres joueurs. Pour `belongsToMany`, la callback filtre la table **liee** (jointe a la table pivot) : qualifie les colonnes ambigues (`b:where("roles.name", "admin")`).
+
 ---
 
 ## countByRelation — Compter les relations
 
-Compte combien d'enregistrements lies chaque parent possede. Les comptes sont recuperes en **une seule** requete `GROUP BY` (au lieu d'un `COUNT` par parent).
+Compte combien d'enregistrements lies chaque parent possede. Les comptes sont recuperes en **une seule** requete `GROUP BY` (au lieu d'un `COUNT` par parent). Les lignes liees supprimees en soft delete ne sont pas comptees.
 
 ```lua
 local results = User.countByRelation("vehicles")
@@ -387,7 +401,7 @@ local player = User.createWith({
 })
 ```
 
-La foreignKey est automatiquement remplie. C'est equivalent a :
+La foreignKey est automatiquement remplie. Le resultat est le meme que :
 
 ```lua
 local player = User.create({ identifier = "license:abc", money = 500, job = "police" })
@@ -395,6 +409,16 @@ Profile.create({ user_id = "license:abc", bio = "Nouveau joueur", avatar = "defa
 Vehicle.create({ owner_id = "license:abc", plate = "ABC123", model = "sultan" })
 Vehicle.create({ owner_id = "license:abc", plate = "XYZ789", model = "adder" })
 ```
+
+mais en mieux :
+
+- toutes les lignes (parent et enfants) sont **validees avant** la premiere ecriture ;
+- les enfants sont inseres en **une requete multi-lignes par table**, dans **une seule transaction** ;
+- si cette transaction echoue, les lignes deja creees (le parent, et les lignes liees d'un `belongsToMany`) sont **supprimees**, puis une erreur est levee.
+
+Le parent et les lignes liees d'un `belongsToMany` (creees avec `create`) declenchent tous leurs hooks. Les enfants `hasOne` / `hasMany` inseres en lot declenchent `beforeCreate` (une fois par ligne, cle etrangere deja remplie) puis `afterBulkCreate` (une fois par relation, apres la transaction), mais pas `afterCreate`. Les cles `belongsTo` dans les donnees sont ignorees.
+
+Le parent et les lignes `belongsToMany` sont ecrits **avant** la transaction : ce n'est pas une ecriture entierement atomique (voir [`Model.createWith`](/docs/api/model#modelcreatewithdata--orvexinstance)).
 
 ---
 

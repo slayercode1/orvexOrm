@@ -4,14 +4,14 @@ sidebar_position: 3
 
 # Instance
 
-An **instance** is an object that represents a row in your database. You get one when you use `create()`, `find()`, or `query():get()`.
+An **instance** is an object that represents one row of your database. You get one when you use `create()`, `find()`, or `query():get()`.
 
 ```lua
 local player = User.find({ identifier = "license:abc" })
 -- "player" is an OrvexInstance
 ```
 
-You can access columns as normal properties:
+You can access the columns like regular properties:
 
 ```lua
 print(player.identifier)  -- "license:abc"
@@ -19,29 +19,37 @@ print(player.money)        -- 500
 print(player.job)          -- "police"
 ```
 
+An instance only holds the row's columns (plus the loaded relations and `_count_*` values): `pairs(player)` only walks your data. The methods and the model context are shared by every instance through a single metatable.
+
+:::caution Columns named like a method
+A column named like an instance method (`update`, `delete`, `get`, `refresh`, `restore`, `increment`, `toTable`...) no longer hides the method: `player:update()` always calls the method. Read the column's value with `player:getAttribute("update")`; `toTable()` includes it.
+:::
+
+Write methods return the **number of affected rows** (`0` if the row no longer exists), like the class methods. See the [conventions](/docs/api/model#conventions).
+
 ---
 
 ## Methods
 
-### `instance:update(data)` → `boolean`
+### `instance:update(data)` → `integer`
 
-Updates this row in the database. The local object is also updated.
+Updates this row in the database and returns the affected row count. The local object is updated too. The data is validated, and `updated_at` is refreshed when `timestamps = true`. Fires `beforeUpdate(instance, data)` then `afterUpdate(instance)`. If `data` changes the primary key, the instance follows: later writes target the new value.
 
 ```lua
 player:update({ money = 1000, job = "medic" })
-print(player.money)  -- 1000 (updated locally as well)
+print(player.money)  -- 1000 (updated locally too)
 ```
 
 **Generated SQL:**
 ```sql
-UPDATE users SET job = ?, money = ? WHERE identifier = ?
+UPDATE `users` SET `job` = ?, `money` = ? WHERE `identifier` = ?
 ```
 
 ---
 
-### `instance:delete()` → `boolean`
+### `instance:delete()` → `integer`
 
-Deletes this row from the database.
+Deletes this row from the database (or fills `deleted_at` when the model has `softDelete`). Fires `beforeDelete` / `afterDelete`.
 
 ```lua
 player:delete()
@@ -49,14 +57,16 @@ player:delete()
 
 **Generated SQL:**
 ```sql
-DELETE FROM users WHERE identifier = ?
+DELETE FROM `users` WHERE `identifier` = ?
 ```
 
 ---
 
 ### `instance:get(relationName)` → `OrvexInstance | OrvexInstance[] | nil`
 
-Retrieves related data through a relation.
+Fetches the data linked through a relation.
+
+A query runs on every call (use `include` to load ahead). If the instance's linking key is `nil`, no query runs: `nil` for `hasOne`/`belongsTo`, `{}` for the multiple relations. Soft-deleted related rows are excluded.
 
 The return type depends on the relation:
 
@@ -68,13 +78,13 @@ The return type depends on the relation:
 | `belongsToMany` | `OrvexInstance[]` (list) |
 
 ```lua
--- hasOne → a single instance
+-- hasOne → one instance
 local profile = player:get("profile")
 
 -- hasMany → a list
 local vehicles = player:get("vehicles")
 
--- belongsTo → a single instance
+-- belongsTo → one instance
 local owner = car:get("owner")
 
 -- belongsToMany → a list
@@ -82,14 +92,14 @@ local roles = player:get("roles")
 ```
 
 :::caution
-The name passed to `:get()` must match exactly the name used when defining the relation (`hasOne("profile", ...)` → `:get("profile")`).
+The name passed to `:get()` must match exactly the name used when the relation was defined (`hasOne("profile", ...)` → `:get("profile")`).
 :::
 
 ---
 
 ### `instance:attach(relationName, relatedInstance)` → `boolean`
 
-Adds a link in the pivot table of a `belongsToMany` relation.
+Adds a link to the pivot table of a `belongsToMany` relation and invalidates the pivot table's cache. Returns `true`.
 
 ```lua
 local adminRole = Role.find({ name = "admin" })
@@ -102,7 +112,7 @@ INSERT INTO user_roles (role_id, user_id) VALUES (?, ?)
 ```
 
 :::caution
-`attach` **only** works on `belongsToMany` relations. If you use it on another relation, an error will be thrown.
+`attach` **only** works on `belongsToMany` relations. Using it on another relation raises an error.
 :::
 
 ---
@@ -122,25 +132,25 @@ DELETE FROM user_roles WHERE role_id = ? AND user_id = ?
 
 ---
 
-### `instance:increment(column, amount?)` → `boolean`
+### `instance:increment(column, amount?)` → `integer`
 
-Increments a numeric column. `amount` is optional (default: 1).
+Increments a numeric column on the MySQL side (`money = money + ?`). `amount` is optional (default: 1), whereas it is required on `Model.increment`. No hook fires; validation and `updated_at` do not apply.
 
 ```lua
 player:increment("money", 100)
-print(player.money)  -- updated locally as well
+print(player.money)  -- updated locally too
 
 player:increment("kills")  -- +1 by default
 ```
 
 **Generated SQL:**
 ```sql
-UPDATE users SET money = money + 100 WHERE identifier = ?
+UPDATE `users` SET `money` = `money` + ? WHERE `identifier` = ?
 ```
 
 ---
 
-### `instance:decrement(column, amount?)` → `boolean`
+### `instance:decrement(column, amount?)` → `integer`
 
 Decrements a numeric column.
 
@@ -150,9 +160,9 @@ player:decrement("money", 50)
 
 ---
 
-### `instance:forceDelete()` → `boolean`
+### `instance:forceDelete()` → `integer`
 
-Permanently deletes the row, even if soft delete is enabled.
+Deletes permanently, even when soft delete is enabled. Fires `beforeDelete` / `afterDelete`.
 
 ```lua
 player:forceDelete()
@@ -160,9 +170,9 @@ player:forceDelete()
 
 ---
 
-### `instance:restore()` → `boolean`
+### `instance:restore()` → `integer`
 
-Restores a soft-deleted row. Requires `softDelete = true`.
+Restores a soft-deleted row. Requires `softDelete = true`. No hook fires.
 
 ```lua
 player:restore()
@@ -173,34 +183,55 @@ print(player.deleted_at)  -- nil
 
 ### `instance:toTable()` → `table`
 
-Returns a plain copy of the instance, without internal fields (`_tableName`, `_adapter`, ...) or metatable. Eager-loaded relations are converted recursively.
+Returns a "flat" copy of the instance: a plain Lua table with every column (including those named like a method), without a metatable. Eager-loaded relations are converted recursively.
 
-The main use case: sending an instance to clients via `TriggerClientEvent` or serializing it with `json.encode`.
+Main use case: sending the data to the client with `TriggerClientEvent` or serializing it with `json.encode`.
 
 ```lua
-local player = User.find({ identifier = "license:abc" }, { include = { "vehicles" } })
+local player = User.find({ identifier = "license:abc" }, {
+    include = { "vehicles" }
+})
 
--- Safe to send to the client
+-- Send to the client (an instance does not go through as is)
 TriggerClientEvent("myresource:playerData", src, player:toTable())
 
--- Safe to serialize
-local json = json.encode(player:toTable())
+-- Or serialize to JSON
+local jsonStr = json.encode(player:toTable())
 ```
+
+:::tip Why toTable?
+An instance has a metatable, which does not survive the network (msgpack): the methods would be lost, and a column named like a method would be missing. `toTable()` gives you a clean table, ready to send.
+:::
 
 ---
 
 ### `instance:refresh()` → `boolean`
 
-Reloads the instance's columns from the database. Returns `false` if the row no longer exists, `true` otherwise. JSON fields are re-decoded.
+Reloads the instance's columns from the database. Returns `false` if the row no longer exists, `true` otherwise. JSON fields are decoded again.
 
 ```lua
 local player = User.find({ identifier = "license:abc" })
 
--- ... the row may have been modified elsewhere ...
+-- Someone else changes the row...
+User.update({ money = 9999 }, { identifier = "license:abc" })
 
+-- Reload the fresh data
 if player:refresh() then
-    print(player.money)  -- fresh value from the database
+    print(player.money)  -- 9999
 else
-    print("Row no longer exists")
+    print("The row no longer exists")
 end
+```
+
+---
+
+### `instance:getAttribute(name)` → `any`
+
+Reads a column, including a column named like an instance method (which `player[name]` would resolve to the method).
+
+```lua
+local Setting = ORM.model("settings", { id = "number", update = "string" })
+local s = Setting.find({ id = 1 })
+print(s:getAttribute("update"))  -- value of the `update` column
+s:update({ update = "daily" })   -- still calls the method
 ```

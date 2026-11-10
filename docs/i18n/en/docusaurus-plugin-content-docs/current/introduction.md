@@ -60,7 +60,7 @@ local User = ORM.model("users", {
 })
 ```
 
-**Step 2**: You use this model to interact with the database:
+**Step 2**: You use this model to interact with the database (in an event, a command or a `CreateThread`: every call waits for MySQL's answer):
 
 ```lua
 -- Create a player
@@ -85,7 +85,7 @@ It's as simple as that. No SQL, no complicated callbacks.
 To use OrvexORM, you need:
 
 - A working **FiveM** server
-- The **[oxmysql](https://github.com/overextended/oxmysql)** resource installed and configured
+- **[oxmysql](https://github.com/overextended/oxmysql)** or **[mysql-async](https://github.com/brouznouf/fivem-mysql-async)** installed and configured
 - A **MySQL** or **MariaDB** database connected to your server
 
-If you already have a FiveM server with oxmysql, you're ready to go. Head over to the [Installation](/docs/installation) page.
+OrvexORM uses oxmysql when it is started, otherwise mysql-async (3.3+ for transactions), with no configuration. Head over to the [Installation](/docs/installation) page.

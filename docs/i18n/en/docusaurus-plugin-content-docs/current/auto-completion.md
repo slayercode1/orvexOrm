@@ -5,7 +5,9 @@ slug: /auto-completion
 
 # Auto-completion (IDE)
 
-OrvexORM includes complete **LuaLS annotations** throughout the source code. This means your IDE can provide auto-completion, type-checking, and inline documentation while you code.
+OrvexORM ships with **LuaLS annotations** (Lua Language Server): the source files are annotated, and the definitions file `lib/types/orvexorm.d.lua` describes the public API LuaLS cannot work out by itself (model methods, which are assembled at runtime). Your IDE can therefore provide auto-completion, type-checking and inline documentation while you code.
+
+Checked with LuaLS 3.19: a script that uses models, instances, the query builder, transactions and the cache produces no `undefined-field` warning.
 
 ---
 
@@ -38,7 +40,11 @@ Create a `.luarc.json` file at the root of your resource:
         "checkThirdParty": false
     },
     "diagnostics": {
-        "globals": ["MySQL", "Citizen", "promise", "json", "OrvexORM"]
+        "globals": [
+            "MySQL", "Citizen", "CreateThread", "Wait", "promise", "json", "exports",
+            "source", "AddEventHandler", "RegisterNetEvent", "RegisterCommand",
+            "TriggerClientEvent", "TriggerEvent", "GetPlayerIdentifierByType"
+        ]
     },
     "completion": {
         "callSnippet": "Replace",
@@ -57,6 +63,8 @@ resources/
 ```
 
 Then `"../orvexorm"` is correct. Adjust according to your structure.
+
+`OrvexORM`, `OrvexAdapter` and `OrvexCache` do not need to be listed in `globals`: LuaLS finds them in the library.
 :::
 
 ### 3. Enjoy auto-completion
@@ -76,26 +84,29 @@ OrvexORM.raw()          -- Raw SQL query
 -- etc.
 ```
 
-**Auto-completion on models** — `User.`, `Vehicle.`, etc.:
+**Auto-completion on models** — `User.`, `Vehicle.`, etc. (declared in `lib/types/orvexorm.d.lua`):
 
 ```lua
-User.create()          -- Create
-User.find()            -- Find one
-User.findAll()         -- Find many
-User.update()          -- Update
-User.delete()          -- Delete
-User.query()           -- Query Builder
-User.count()           -- Count
+User.create()          -- Create         → OrvexInstance
+User.find()            -- Find one       → OrvexInstance|nil
+User.findAll()         -- Find many      → OrvexInstance[]
+User.update()          -- Update (data, where) → integer (affected rows)
+User.delete()          -- Delete         → integer
+User.query()           -- Query Builder  → OrvexBuilder
+User.count()           -- Count          → integer
+User.whereHas()        -- Filter by relation → OrvexBuilder
 User.sync()            -- Create table
 User.hook()            -- Add a hook
-User.beforeCreate()    -- Shorthand hook
--- etc.
+User.beforeCreate()    -- Shorthand hook (all 13 events are declared)
+-- etc.: every method of the Model reference
 ```
+
+The scopes you declare (`User.rich()`) are not listed, since their names are only known at runtime, but calling them is typed and returns an `OrvexBuilder`: the rest of the chain (`:where()`, `:get()`) is completed normally.
 
 **Auto-completion on instances** — `player:`, `vehicle:`, etc.:
 
 ```lua
-player:update()        -- Update this instance
+player:update()        -- Update this instance → integer
 player:delete()        -- Delete
 player:increment()     -- Increment a field
 player:decrement()     -- Decrement a field
@@ -103,7 +114,18 @@ player:get()           -- Load a relation
 player:attach()        -- Attach (many-to-many)
 player:detach()        -- Detach
 player:restore()       -- Restore (soft delete)
+player:toTable()       -- Plain copy
+player:getAttribute()  -- Read a column named like a method
 -- etc.
+```
+
+Columns (`player.money`) are typed `any`: LuaLS does not know your schema.
+
+**Transactions** — both forms of `OrvexORM.transaction` are declared (`---@overload`):
+
+```lua
+local tx = OrvexORM.transaction()                 -- OrvexTransaction: tx:insert(), tx:commit()...
+local ok = OrvexORM.transaction(function(tx) end) -- boolean
 ```
 
 **Inline documentation** — hover over any method to see its description, parameters, and types:
@@ -111,7 +133,7 @@ player:restore()       -- Restore (soft delete)
 ```lua
 ---@param tableName string      The MySQL table name
 ---@param fields table          The fields and their types
----@param opts? OrvexModelOpts  Options (primaryKey, softDelete, timestamps...)
+---@param opts? OrvexModelOpts  Options (primaryKey, softDelete, timestamps, hooks, scopes, relations, adapter, cache)
 ---@return OrvexModel
 ```
 
@@ -132,8 +154,16 @@ OrvexORM defines the following types for LuaLS:
 | `OrvexTableBuilder` | The column builder in migrations |
 | `OrvexCache` | The cache system |
 | `OrvexAdapter` | The database adapter |
-| `OrvexFieldType` | `"string"` \| `"number"` \| `"boolean"` \| `"json"` \| `"auto"` |
-| `OrvexModelOpts` | Model options (primaryKey, softDelete, timestamps) |
+| `OrvexFieldType` | `"string"` \| `"number"` \| `"boolean"` \| `"json"` \| `"auto"` \| `"date"` \| `"datetime"` \| `"timestamp"` |
+| `OrvexModelOpts` | Model options (primaryKey, softDelete, timestamps, hooks, scopes, relations, adapter, cache) |
+| `OrvexHookMap` | The inline hooks of `opts.hooks`, one typed field per event |
+| `OrvexFindOpts` | Options of `find` / `findAll` / `all` (`select`, `include`) |
+| `OrvexWhere` | A where clause: `{ column = value }` or `{ column = { operator, value } }` |
+| `OrvexPaginateResult` | Result of `:paginate()` (`data`, `total`, `page`, `perPage`, `lastPage`) |
+| `OrvexRelationCount` | An entry of `countByRelation` (`instance`, `count`) |
+| `OrvexCacheOpts` | Options of `OrvexCache.new` (`ttl`, `enabled`, `maxEntries`, `sweepInterval`) |
+| `OrvexCacheStats` | Result of `OrvexORM.cacheStats()` |
+| `OrvexDriver` | The driver contract (`execute`, `scalar`, `transaction?`) for `OrvexAdapter.new` |
 | `OrvexMigration` | Migration definition (name, up, down) |
 | `OrvexRelationDef` | Relation definition |
 
@@ -159,7 +189,7 @@ require('lspconfig').lua_ls.setup({
                 checkThirdParty = false,
             },
             diagnostics = {
-                globals = { "MySQL", "Citizen", "promise", "json", "OrvexORM" },
+                globals = { "MySQL", "Citizen", "CreateThread", "Wait", "promise", "json", "exports", "source" },
             },
         },
     },
@@ -170,4 +200,4 @@ require('lspconfig').lua_ls.setup({
 
 ## Source distribution
 
-OrvexORM is distributed as source `.lua` files with complete LuaLS annotations. Auto-completion works natively — just add the OrvexORM folder to `workspace.library` in your `.luarc.json`.
+OrvexORM is distributed as annotated source `.lua` files, with the definitions file `lib/types/orvexorm.d.lua` (a `---@meta` file, never loaded by FiveM). Just add the OrvexORM folder to `workspace.library` in your `.luarc.json`.

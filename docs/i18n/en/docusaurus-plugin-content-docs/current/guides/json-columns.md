@@ -154,6 +154,10 @@ for _, item in ipairs(inv.items) do
 end
 ```
 
+:::caution Transactions and raw SQL
+JSON encoding is done by the model. The `tx:insert` / `tx:update` methods of [transactions](/docs/guides/transactions) and `OrvexORM.raw` / `rawExec` do not go through the model: encode yourself with `json.encode(value)`, and decode the rows of `OrvexORM.raw` with `json.decode`.
+:::
+
 ### Recommended SQL table
 
 For JSON columns, use the `JSON` or `LONGTEXT` type in MySQL:

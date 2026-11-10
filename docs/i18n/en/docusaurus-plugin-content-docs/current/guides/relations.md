@@ -56,6 +56,12 @@ A **foreignKey** (foreign key) is a column that creates the link between two tab
 For example, in the `vehicles` table, the `owner_id` column contains the player's identifier. It's the foreignKey that links a vehicle to its owner.
 :::
 
+:::info Rules shared by every relation
+- Declaring a relation (`User.hasMany(...)`) runs no query: you can do it at the top level of the script. Loading it (`:get()`, `include`, `whereHas`) waits for the database: in a thread, an event or a command.
+- If the linking key is `nil` (for example a vehicle without `owner_id`), no query runs: `nil` for `hasOne` / `belongsTo`, `{}` for `hasMany` / `belongsToMany`.
+- If the related model has `softDelete = true`, its soft-deleted rows are excluded everywhere: `:get()`, `include`, `whereHas` and `countByRelation`.
+:::
+
 ---
 
 ## hasOne (One to One)
@@ -282,7 +288,7 @@ local owner = car:get("owner")
 
 ---
 
-## Eager Loading
+## Eager Loading (loading ahead)
 
 Instead of calling `:get("relation")` each time, you can load relations automatically with `include`:
 
@@ -296,27 +302,36 @@ print(player.profile.bio)
 print(#player.vehicles)
 ```
 
-`findAll` (and `all`) also accept `include`. Relations are loaded in **batch**: a single `WHERE fk IN (...)` query per relation, no matter how many rows are returned (no N+1 problem).
+### Eager loading on several results
+
+`findAll` (and its shortcut `all`) also accepts `include`. Loading is **batched**: a single `WHERE fk IN (...)` query per relation, no matter how many results there are. This is what avoids the well-known **N+1** problem (1 query per player).
 
 ```lua
 local cops = User.findAll({ job = "police" }, {
-    include = { "vehicles" }
+    include = { "profile", "vehicles" }
 })
--- 2 queries total: 1 for the users, 1 for all their vehicles
 
 for _, cop in ipairs(cops) do
-    print(cop.identifier .. " has " .. #cop.vehicles .. " vehicle(s)")
+    print(cop.profile.bio)   -- already loaded, no query
+    print(#cop.vehicles)     -- already loaded, no query
 end
 ```
 
-**Generated SQL:**
+**Generated SQL (3 queries in total, however many officers there are):**
 ```sql
 SELECT * FROM users WHERE job = ?
+SELECT * FROM profiles WHERE user_id IN (?, ?, ?)
 SELECT * FROM vehicles WHERE owner_id IN (?, ?, ?)
 ```
 
-:::info
-Batched loading works for `hasOne`, `hasMany`, and `belongsTo`. For `belongsToMany`, relations are loaded per instance.
+:::info belongsToMany
+Batched loading works for all 4 relation types. For `belongsToMany`, a single join on the pivot table loads the related rows of every parent:
+
+```sql
+SELECT roles.*, user_roles.user_id FROM roles
+INNER JOIN user_roles ON user_roles.role_id = roles.id
+WHERE user_roles.user_id IN (?, ?, ?)
+```
 :::
 
 ---
@@ -347,11 +362,13 @@ SELECT * FROM users WHERE EXISTS (
 )
 ```
 
+The linking condition is a constraint: an `orWhere` inside the callback stays grouped with it (`link AND (cond1 OR cond2)`) and cannot match other players' vehicles. For `belongsToMany`, the callback filters the **related** table (joined to the pivot table): qualify ambiguous columns (`b:where("roles.name", "admin")`).
+
 ---
 
 ## countByRelation — Count relations
 
-Counts how many related records each parent has. A single `GROUP BY` query is used, no matter how many parents there are.
+Counts how many related records each parent has. The counts are fetched in **a single** `GROUP BY` query (instead of one `COUNT` per parent). Soft-deleted related rows are not counted.
 
 ```lua
 local results = User.countByRelation("vehicles")
@@ -365,7 +382,7 @@ end
 
 ---
 
-## Nested Writes
+## Nested Writes — Writing nested records
 
 Creates a record with its relations in a single call.
 
@@ -384,7 +401,7 @@ local player = User.createWith({
 })
 ```
 
-The foreignKey is automatically filled in. This is equivalent to:
+The foreignKey is automatically filled in. The result is the same as:
 
 ```lua
 local player = User.create({ identifier = "license:abc", money = 500, job = "police" })
@@ -392,6 +409,16 @@ Profile.create({ user_id = "license:abc", bio = "New player", avatar = "default.
 Vehicle.create({ owner_id = "license:abc", plate = "ABC123", model = "sultan" })
 Vehicle.create({ owner_id = "license:abc", plate = "XYZ789", model = "adder" })
 ```
+
+but better:
+
+- every row (parent and children) is **validated before** the first write;
+- children are inserted with **one multi-row query per table**, in **a single transaction**;
+- if that transaction fails, the rows already created (the parent, and the related rows of a `belongsToMany`) are **deleted**, then an error is raised.
+
+The parent and the related rows of a `belongsToMany` (created with `create`) fire all their hooks. The `hasOne` / `hasMany` children inserted in batch fire `beforeCreate` (once per row, foreign key already set) then `afterBulkCreate` (once per relation, after the transaction), but not `afterCreate`. `belongsTo` keys in the data are ignored.
+
+The parent and the `belongsToMany` rows are written **before** the transaction: this is not a fully atomic write (see [`Model.createWith`](/docs/api/model#modelcreatewithdata--orvexinstance)).
 
 ---
 
@@ -411,7 +438,8 @@ Vehicle.create({ owner_id = "license:abc", plate = "XYZ789", model = "adder" })
 
 | Advanced feature | Method | Description |
 |---|---|---|
-| Eager Loading | `Model.find/findAll(where, { include = {...} })` | Loads relations automatically (batched on `findAll`) |
+| Eager Loading | `Model.find(where, { include = {...} })` | Loads relations automatically |
+| Eager Loading (list) | `Model.findAll(where, { include = {...} })` | Batched loading, 1 query per relation |
 | Filter by relation | `Model.whereHas("relation")` | WHERE EXISTS |
 | Count relations | `Model.countByRelation("relation")` | Counts the links |
-| Nested Writes | `Model.createWith(data)` | Creates parent + children |
+| Nested write | `Model.createWith(data)` | Creates parent + children |

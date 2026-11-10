@@ -28,7 +28,7 @@ MySQL.prepare("SELECT * FROM users WHERE identifier = ?", { id }, function(resul
     end
 end)
 
--- Avec OrvexORM
+-- Avec OrvexORM (dans un thread : event, commande ou Citizen.CreateThread)
 local player = User.find({ identifier = id })
 player:update({ money = 1000 })
 ```
@@ -54,18 +54,46 @@ ensure oxmysql    # ou mysql-async
 ensure orvexorm
 ```
 
-> OrvexORM detecte automatiquement **oxmysql** ou **mysql-async**. Aucune configuration necessaire.
+> OrvexORM choisit le driver au premier appel, sans configuration : **oxmysql** (via ses exports
+> `executeSync`/`insertSync`/`updateSync`/`transactionSync`) s'il est demarre, sinon **mysql-async**
+> (via `exports['mysql-async']`). Si les deux tournent, oxmysql gagne. La librairie MySQL doit etre
+> demarree **avant** `orvexorm`. Les transactions sous mysql-async demandent mysql-async **3.3 ou plus**.
+> Details : [Installation](https://slayercode1.github.io/orvexOrm/docs/installation#driver-mysql).
 
 4. Dans chaque ressource qui utilise l'ORM, charge OrvexORM avant tes scripts serveur :
 
 ```lua
 dependency 'orvexorm'
+server_script '@orvexorm/lib/import.lua'
 
-server_scripts {
-    '@orvexorm/import.lua',
-    'server/**/*.lua'
-}
+server_script 'server/**/*.lua'
 ```
+
+`lib/import.lua` charge l'ORM **dans ta ressource** : `OrvexORM` y est une vraie table Lua, et les
+instances, les query builders et les `tx` gardent leurs methodes. Chaque ressource a donc sa propre
+instance de l'ORM (son propre cache, son propre `debug`, son propre adaptateur). L'ancien
+`exports.orvexorm:lib()` reste disponible mais **ne transmet pas les methodes** (les exports FiveM
+perdent les metatables) : ne l'utilise plus.
+
+### A savoir : les appels attendent la base
+
+Chaque appel a l'ORM attend la reponse de MySQL (il *yield* la coroutine courante). Appelle-le
+depuis un handler d'event, une commande ou un `Citizen.CreateThread`, jamais au niveau superieur
+d'un script :
+
+```lua
+-- server/main.lua
+local User = OrvexORM.model("users", { identifier = "string", money = "number" },
+    { primaryKey = "identifier" })  -- OK : definir un modele ne touche pas la base
+
+CreateThread(function()
+    OrvexORM.migrate()               -- une fois, au demarrage
+    print(User.count() .. " joueurs")
+end)
+```
+
+Hors thread, l'ORM leve une erreur claire (`database calls yield and must run inside
+Citizen.CreateThread...`). Voir [Async et threads](https://slayercode1.github.io/orvexOrm/docs/getting-started#async-et-threads).
 
 ---
 
@@ -113,14 +141,15 @@ TriggerClientEvent("monScript:player", src, player:toTable())
 -- Verifier
 if User.exists({ identifier = "license:abc" }) then ... end
 
--- Modifier
+-- Modifier : les ecritures retournent le nombre de lignes touchees
 player:update({ money = 1000 })
 player:increment("money", 500)
-User.updateWhere({ identifier = "license:abc" }, { job = "medic" })
+local n = User.update({ job = "medic" }, { identifier = "license:abc" })  -- data, puis where
+if n == 0 then print("aucun joueur modifie") end
 
 -- Supprimer
 player:delete()
-User.deleteWhere({ job = "unemployed" })
+User.delete({ job = "unemployed" })
 ```
 
 ### Query Builder
@@ -150,10 +179,10 @@ User.avg("money", { job = "medic" })
 -- Extraire une colonne
 local jobs = User.pluck("job")
 
--- Traiter par lots
-User.query():chunk(100, function(players)
+-- Traiter par lots (keyset : cout constant, meme sur une grosse table)
+User.query():chunkById(100, function(players)
     for _, p in ipairs(players) do p:update({ money = 0 }) end
-end)
+end, "identifier")
 
 -- Clause SQL libre (toujours avec des parametres, jamais de concatenation !)
 User.query():whereRaw("JSON_EXTRACT(position, '$.x') > ?", { 100 }):get()
@@ -162,7 +191,8 @@ User.query():whereRaw("JSON_EXTRACT(position, '$.x') > ?", { 100 }):get()
 ### Cache
 
 ```lua
-OrvexORM.enableCache({ ttl = 60 })  -- cache lecture 60s, invalide automatiquement a l'ecriture
+OrvexORM.enableCache({ ttl = 60 })  -- cache lecture 60s (1000 entrees max, LRU)
+-- invalide a chaque ecriture : modeles, transactions, OrvexORM.raw / rawExec
 
 -- Surveiller l'efficacite du cache
 local stats = OrvexORM.cacheStats()
@@ -201,11 +231,19 @@ User.createWith({
 ### Transactions
 
 ```lua
-OrvexORM.transaction(function(tx)
-    tx:update("users", { money = 900 }, { identifier = fromId })
-    tx:update("users", { money = 1100 }, { identifier = toId })
+-- Toutes les requetes partent ensemble, de facon atomique
+local ok = OrvexORM.transaction(function(tx)
+    tx:insert("vehicles", { owner = id, model = "sultan", plate = plate })
+    tx:delete("vehicle_orders", { plate = plate })
 end)
 ```
+
+Seules les methodes `tx:*` font partie de la transaction (un `User.create` dans la callback part
+tout de suite, hors transaction), et elles ne passent ni par la validation, ni par le JSON, ni par
+les timestamps, ni par les hooks. Une transaction ne peut pas lire ni verifier le nombre de lignes
+touchees entre deux requetes : pour un transfert d'argent, utilise **une seule requete
+conditionnelle** et verifie son resultat. Voir le
+[guide Transactions](https://slayercode1.github.io/orvexOrm/docs/guides/transactions).
 
 ### Migrations
 
@@ -230,7 +268,9 @@ OrvexORM.migrations({
     },
 })
 
-OrvexORM.migrate()
+CreateThread(function()
+    OrvexORM.migrate()  -- leve une erreur a la premiere migration en echec
+end)
 ```
 
 ---
@@ -246,24 +286,31 @@ OrvexORM.migrate()
 | `"date"` | `DATE` | `"2024-03-15"` |
 | `"datetime"` | `DATETIME` | `"2024-03-15 14:30:00"` |
 | `"timestamp"` | `TIMESTAMP` | `"2024-03-15 14:30:00"` |
+| `"auto"` | `TEXT` | table encodee en JSON, chaine JSON decodee a la lecture |
+
+Une cle absente du schema est refusee (`Unknown field 'x'`), sauf `created_at` / `updated_at`
+(avec `timestamps = true`) et `deleted_at` (avec `softDelete = true`), geres par l'ORM.
 
 ---
 
 ## Performance
 
-Benchmarks sur Lua 5.3 (FiveM utilise Lua 5.4 = encore plus rapide) :
+Cout cote Lua (hors aller-retour MySQL), mesure par `tests/benchmark.lua` sur Lua 5.4 avec une base simulee :
 
-| Operation | Temps |
-|---|---|
-| `Model.find()` | **0.005 ms** |
-| `Model.create()` | **0.009 ms** |
-| `Model.update()` | **0.007 ms** |
-| `Model.delete()` | **0.005 ms** |
-| `instance:increment()` | **0.004 ms** |
-| Query builder (simple) | **0.008 ms** |
-| Cache hit | **0.0002 ms** |
+| Operation | Temps | Requetes |
+|---|---|---|
+| `Model.find()` | **0.007 ms** | 1 |
+| `Model.create()` | **0.006 ms** | 1 |
+| `Model.update()` | **0.009 ms** | 1 |
+| `Model.delete()` | **0.006 ms** | 1 |
+| `instance:increment()` | **0.003 ms** | 1 |
+| `Model.findAll()` 1000 lignes | **1.3 ms** | 1 |
+| `findAll()` 1000 lignes + `include` hasMany | **3.7 ms** | 2 |
+| Query builder (simple) | **0.007 ms** | 0 |
+| Cache hit | **0.006 ms** | 0 |
 
-> Les requetes sont parametrees et les chargements de relations sont groupes pour limiter les allers-retours vers la base. Mesure les performances sur ta propre charge et ta propre infrastructure.
+> Le vrai cout est le nombre d'allers-retours vers la base : les requetes sont parametrees et les
+> chargements de relations sont groupes (1 requete par relation). Mesure sur ta propre charge.
 
 ---
 
@@ -272,32 +319,39 @@ Benchmarks sur Lua 5.3 (FiveM utilise Lua 5.4 = encore plus rapide) :
 <details>
 <summary><strong>Model (classe)</strong></summary>
 
+Les ecritures (`update`, `delete`, `forceDelete`, `restore`, `increment`, `decrement`, et leurs
+versions instance) retournent le **nombre de lignes touchees** (`0` = rien n'a change).
+
 | Methode | Description |
 |---|---|
 | `Model.create(data)` | Inserer une ligne |
 | `Model.createMany(rows)` | Inserer en masse |
 | `Model.createWith(data)` | Inserer avec relations |
-| `Model.find(where, opts?)` | Trouver un enregistrement (`opts.include` pour les relations) |
+| `Model.find(where?, opts?)` | Trouver un enregistrement (`LIMIT 1`, `opts.include` pour les relations) |
 | `Model.findOrFail(where)` | Trouver ou erreur |
-| `Model.findAll(where, opts?)` | Trouver tous (`opts.include` = eager loading batche) |
+| `Model.findAll(where?, opts?)` | Trouver tous (`opts.include` = eager loading batche) |
 | `Model.all(opts?)` | Toutes les lignes |
 | `Model.first(where?)` | Premier resultat |
 | `Model.exists(where)` | Existe ? |
 | `Model.pluck(col, where?)` | Extraire une colonne |
-| `Model.update(data, where)` | Modifier |
-| `Model.updateWhere(where, data)` | Modifier (alias lisible) |
+| `Model.update(data, where)` | Modifier (**data d'abord**) |
+| `Model.updateWhere(where, data)` | Modifier (alias, **where d'abord**) |
 | `Model.upsert(data)` | Insert ou update |
 | `Model.delete(where)` | Supprimer |
 | `Model.deleteWhere(where)` | Supprimer (alias) |
 | `Model.forceDelete(where)` | Supprimer definitivement |
 | `Model.restore(where)` | Restaurer (soft delete) |
-| `Model.increment(col, n, where)` | Incrementer |
-| `Model.decrement(col, n, where)` | Decrementer |
+| `Model.increment(col, n, where)` | Incrementer (`n` obligatoire) |
+| `Model.decrement(col, n, where)` | Decrementer (`n` obligatoire) |
 | `Model.findOrCreate(where, defaults)` | Trouver ou creer |
 | `Model.updateOrCreate(where, data)` | MAJ ou creer |
-| `Model.count/sum/avg/min/max` | Agregations |
+| `Model.count(where?)` | Compter (**where d'abord**) |
+| `Model.sum/avg/min/max(col, where?)` | Agregations (**colonne d'abord**) |
 | `Model.query()` | Query builder |
+| `Model.whereHas(rel, fn?)` | Filtrer par relation (`EXISTS`) |
+| `Model.countByRelation(rel, where?)` | Compter les relations (1 requete) |
 | `Model.scope(name, fn)` | Definir un scope |
+| `Model.hook(event, fn)` | Ajouter un hook (instance ou bulk) |
 | `Model.sync()` | Creer la table |
 
 </details>
@@ -311,13 +365,14 @@ Benchmarks sur Lua 5.3 (FiveM utilise Lua 5.4 = encore plus rapide) :
 | `instance:delete()` | Supprimer cette ligne |
 | `instance:forceDelete()` | Supprimer definitivement |
 | `instance:restore()` | Restaurer |
-| `instance:increment(col, n?)` | Incrementer |
-| `instance:decrement(col, n?)` | Decrementer |
+| `instance:increment(col, n?)` | Incrementer (`n` = 1 par defaut) |
+| `instance:decrement(col, n?)` | Decrementer (`n` = 1 par defaut) |
 | `instance:get(relation)` | Charger une relation |
 | `instance:attach(relation, inst)` | Lier (pivot) |
 | `instance:detach(relation, inst)` | Delier (pivot) |
 | `instance:toTable()` | Table propre (safe pour `TriggerClientEvent` / `json.encode`) |
 | `instance:refresh()` | Recharger depuis la base |
+| `instance:getAttribute(col)` | Lire une colonne nommee comme une methode (`update`, `get`...) |
 
 </details>
 
@@ -329,9 +384,11 @@ Benchmarks sur Lua 5.3 (FiveM utilise Lua 5.4 = encore plus rapide) :
 | `:where(field, value)` | Egalite (raccourci) |
 | `:where(field, op, value)` | Avec operateur |
 | `:where({ field = value })` | Table |
-| `:orWhere(...)` | OR |
+| `:orWhere(...)` | OR (groupe entre parentheses apres les contraintes du modele) |
+| `:whereColumn(a, op?, b)` | Comparer deux colonnes |
 | `:whereIn(col, values)` | IN |
 | `:whereNotIn(col, values)` | NOT IN |
+| `:whereInSub(col, subSQL, params?)` / `:whereNotInSub(...)` | IN / NOT IN sous-requete |
 | `:whereBetween(col, min, max)` | BETWEEN |
 | `:whereNotBetween(col, min, max)` | NOT BETWEEN |
 | `:whereLike(col, pattern)` | LIKE |
@@ -358,7 +415,8 @@ Benchmarks sur Lua 5.3 (FiveM utilise Lua 5.4 = encore plus rapide) :
 | `:pluck(col)` | Extraire colonne |
 | `:exists()` | Existe ? |
 | `:paginate(page, perPage?)` | Pagination |
-| `:chunk(size, fn)` | Traiter par lots |
+| `:chunk(size, fn)` | Traiter par lots (OFFSET) |
+| `:chunkById(size, fn, col?)` | Traiter par lots (keyset, recommande) |
 | `:toSQL()` | Voir le SQL |
 
 </details>
@@ -382,13 +440,26 @@ http://localhost:30120/orvexorm/?token=a1b2c3d4...
 - Voir toutes les tables et leur schema
 - Parcourir, filtrer et trier les donnees
 - Ajouter, modifier et supprimer des lignes
-- Protege par token + verrouillage anti-bruteforce (5 echecs = IP bloquee 5 min)
+- **Loopback uniquement par defaut** (`127.0.0.1`, `::1`) : les autres adresses recoivent un `404`
+- Token dans l'URL accepte seulement au premier chargement, puis envoye dans l'en-tete `X-Studio-Token`
+- Verrouillage anti-bruteforce (5 echecs = IP bloquee 5 min), 120 requetes/min par adresse
 - Session en memoire limitee a 30 minutes, sans cookie persistant
-- Fonctionne avec oxmysql **et** mysql-async (meme auto-detection que l'ORM)
+- Fonctionne avec oxmysql **et** mysql-async (meme detection que l'ORM)
 
-> **Securite** : l'endpoint est expose sur le port public du serveur (30120). Le token est
-> garde le token uniquement en memoire sauf si tu fournis explicitement `orvex_studio_token`. Arrete le Studio
-> (`orvexstudio stop`) des que tu as fini. Ne partage jamais l'URL.
+Depuis ton PC, passe par un **tunnel SSH** plutot que d'ouvrir le Studio au reseau (le trafic est en HTTP clair) :
+
+```bash
+ssh -L 30120:127.0.0.1:30120 user@ton-serveur
+# puis ouvre l'URL affichee : http://localhost:30120/orvexorm/?token=...
+```
+
+Pour autoriser d'autres adresses (deconseille), avant `orvexstudio` :
+
+```cfg
+set orvex_studio_allow "127.0.0.1, ::1, 10.0.0.0/24"   # IP, plages IPv4 CIDR, ou "*"
+```
+
+> Arrete le Studio (`orvexstudio stop`) des que tu as fini. Ne partage jamais l'URL.
 >
 > Documentation complete : [Studio](https://slayercode1.github.io/orvexOrm/docs/guides/studio)
 
@@ -399,12 +470,27 @@ http://localhost:30120/orvexorm/?token=a1b2c3d4...
 | | Supporte |
 |---|---|
 | FiveM | Lua 5.4 |
-| oxmysql | Auto-detecte |
-| mysql-async | Auto-detecte |
+| oxmysql | Detecte (exports, ou `@oxmysql/lib/MySQL.lua`) |
+| mysql-async | Detecte (exports, ou `@mysql-async/lib/MySQL.lua`) ; 3.3+ pour les transactions |
 | MySQL | 5.7+ |
 | MariaDB | 10.2+ |
 
 ---
+
+## Nouveautes v1.3.0
+
+Version de corrections et de durcissement. Liste complete et changements de comportement dans le
+[CHANGELOG](CHANGELOG.md). Les points a verifier avant de mettre a jour :
+
+- **Import** : `server_script '@orvexorm/lib/import.lua'` charge l'ORM dans ta ressource (les
+  methodes des instances et des builders fonctionnent enfin entre ressources).
+- **Valeurs de retour** : `update`, `delete`, `increment`... retournent le nombre de lignes touchees.
+- **Migrations** : `migrate()` / `rollback()` levent une erreur a la premiere migration en echec.
+- **Studio** : loopback uniquement par defaut (`orvex_studio_allow`), token en en-tete pour l'API.
+- **Hooks** : les ecritures de classe declenchent les nouveaux hooks `before/afterBulkUpdate`,
+  `before/afterBulkDelete`, `before/afterUpsert`, `afterBulkCreate`.
+- **SQL** : identifiants entre backticks (`group`, `key`, `order` utilisables comme colonnes),
+  `orWhere` ne contourne plus le soft delete, `limit`/`offset` valides.
 
 ## Nouveautes v1.2.0
 

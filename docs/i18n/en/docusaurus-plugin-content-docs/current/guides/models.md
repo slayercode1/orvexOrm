@@ -34,6 +34,9 @@ When defining your schema, you need to specify what **type** of data each column
 | `"number"` | A number | `500`, `3.14` |
 | `"boolean"` | True or false | `true`, `false` |
 | `"json"` | A Lua table (saved as JSON) | `{ x = 1, y = 2 }` |
+| `"date"` | A date | `"2024-03-15"` |
+| `"datetime"` | Date and time | `"2024-03-15 14:30:00"` |
+| `"timestamp"` | Timestamp | `"2024-03-15 14:30:00"` |
 
 ### The `json` type in detail
 
@@ -134,3 +137,82 @@ local Inventory = OrvexORM.model("inventories", {
     metadata   = "json",
 }, { primaryKey = "id" })
 ```
+
+## Reserved column names
+
+Column and table names are always wrapped in backticks in the generated SQL: a `group`, `key`, `order` or `rank` column (like in the *Players* example above) works without any precaution. Names may only contain letters, digits, `_` and `.`.
+
+## What the schema controls
+
+The schema (`fields`) is not just a hint: a write with a key missing from the schema is **rejected** (`Unknown field 'x'`). Declare every column you write. The only exceptions: `created_at` / `updated_at` with `timestamps = true` and `deleted_at` with `softDelete = true`, which the ORM manages. See [Validation](/docs/guides/validation#unknown-columns).
+
+## All options
+
+| Option | Default | Role |
+|---|---|---|
+| `primaryKey` | `"id"` | Column that identifies a row |
+| `timestamps` | `false` | Fills `created_at` / `updated_at` |
+| `softDelete` | `false` | `delete()` fills `deleted_at` instead of deleting |
+| `hooks` | `nil` | One hook per event (see [Hooks](/docs/api/model#hooks-lifecycle)) |
+| `scopes` | `nil` | Reusable filters, callable as methods |
+| `relations` | `nil` | Callback declaring the relations, run by `applyRelations()` |
+| `adapter` | default | Adapter of this model only |
+| `cache` | global cache | Cache of this model only (see [Cache](/docs/guides/cache#one-cache-per-model)) |
+
+## Inline hooks and scopes
+
+You can declare hooks and scopes directly in the model definition (one hook per event in `hooks`; use `User.hook(event, fn)` to add more):
+
+```lua
+local User = OrvexORM.model("users", {
+    identifier = "string",
+    money      = "number",
+    job        = "string",
+}, {
+    primaryKey = "identifier",
+    hooks = {
+        beforeCreate = function(data)
+            data.money = data.money or 500  -- default value
+        end,
+        afterDelete = function(instance)
+            print("Player deleted: " .. instance.identifier)
+        end,
+        -- Class-level write (User.update(data, where)): no instance
+        afterBulkUpdate = function(data, where, affected)
+            print(affected .. " player(s) updated")
+        end,
+    },
+    scopes = {
+        rich = function(b) b:where("money", ">", 10000) end,
+        cops = function(b) b:where({ job = "police" }) end,
+    },
+})
+
+-- Scopes are callable as direct methods!
+local riches = User.rich():get()
+local richCops = User.rich():where({ job = "police" }):get()
+```
+
+## Inline relations
+
+You can also declare relations in the model definition through a callback:
+
+```lua
+local User = OrvexORM.model("users", {
+    identifier = "string",
+    money      = "number",
+}, {
+    primaryKey = "identifier",
+    relations = function(M)
+        M.hasMany("vehicles", Vehicle, { foreignKey = "owner_id" })
+        M.hasOne("profile", Profile, { foreignKey = "user_id" })
+    end,
+})
+
+-- Call once every model has been created
+User.applyRelations()
+```
+
+:::tip Why `applyRelations()`?
+Relations reference other models. When you declare them inline, those models must already exist. Call `applyRelations()` once all your models are created.
+:::

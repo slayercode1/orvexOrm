@@ -12,7 +12,7 @@ slug: /installation
 - A **MySQL** or **MariaDB** database
 
 :::info Compatibility
-OrvexORM automatically detects which MySQL library is installed on your server. No configuration needed — it works with both. Under the hood, the driver uses `MySQL.query`/`MySQL.insert`/`MySQL.update` with the oxmysql global API (instead of `MySQL.prepare`, which flattens single-row results), and `MySQL.Async.insert` under mysql-async to get the real `insertId`.
+OrvexORM picks the MySQL driver by itself, on the first call. The details are in [MySQL driver](#mysql-driver).
 :::
 
 ---
@@ -49,33 +49,46 @@ ensure orvexorm
 ```
 
 :::caution Important
-Your MySQL library (`oxmysql` or `mysql-async`) must **always** be started before `orvexorm`.
+Your MySQL library (`oxmysql` or `mysql-async`) must **always** be started before `orvexorm`: detection happens on the first call, and if neither is running the call fails with `No MySQL library found. Ensure oxmysql or mysql-async is started before orvexorm.`
 :::
+
+## MySQL driver
+
+On the first call, OrvexORM tries, in this order (the first match wins):
+
+| Order | Condition | Mode | Functions used |
+|---|---|---|---|
+| 1 | oxmysql `MySQL` global (`@oxmysql/lib/MySQL.lua` loaded **inside orvexorm**) | `oxmysql_global` | `MySQL.query.await`, `MySQL.insert.await`, `MySQL.update.await`, `MySQL.transaction.await` |
+| 2 | `MySQL.Async` global (`@mysql-async/lib/MySQL.lua` loaded **inside orvexorm**) | `mysql-async` | `MySQL.Async.fetchAll`, `execute`, `insert`, `transaction` |
+| 3 | `oxmysql` resource started | `oxmysql_export` | `exports.oxmysql:executeSync`, `insertSync`, `updateSync`, `transactionSync` |
+| 4 | `mysql-async` resource started | `mysql-async` | `exports['mysql-async']:mysql_fetch_all`, `mysql_execute`, `mysql_insert`, `mysql_transaction` |
+
+The shipped `fxmanifest.lua` loads neither `MySQL.lua` file, so the **exports** (rows 3 and 4) are what is used. When both oxmysql and mysql-async are started, **oxmysql is chosen**. Modes 1 and 2 only apply if you add `@oxmysql/lib/MySQL.lua` or `@mysql-async/lib/MySQL.lua` to orvexorm's `server_scripts` yourself.
+
+Good to know:
+
+- Reads go through `MySQL.query` / `executeSync` (text protocol), not `MySQL.prepare`, which flattens single-row results and reads a table parameter as a batch.
+- In `oxmysql_global` mode, a SQL error raises a Lua error (the `.await` form is used). Before, the thread could hang.
+- **mysql-async 3.3 or later** is required for transactions: OrvexORM uses its native transaction (`MySQL.Async.transaction`), the only atomic way under mysql-async. On an older version, `commit()` raises `atomic transactions need mysql-async >= 3.3` and sends nothing.
+- Under mysql-async, a SQL error outside a transaction may never call the callback back (a mysql-async limitation): the thread then waits forever. Prefer oxmysql.
+- Every call **waits** for the database: see [Async and threads](/docs/getting-started#async-and-threads).
 
 ## Use in your resource
 
 Configure your resource to use OrvexORM:
-
-**Option A: Direct import (recommended)**
 
 ```lua title="your-resource/fxmanifest.lua"
 fx_version 'cerulean'
 game 'common'
 
 dependency 'orvexorm'
+server_script '@orvexorm/lib/import.lua'   -- Loads OrvexORM, before your scripts
 
-server_scripts {
-    '@orvexorm/lib/import.lua',   -- Load OrvexORM
-    'server.lua',
-}
+server_script 'server.lua'
 ```
 
-:::tip Migrations and schema
-To use migrations or schema features, use the full `@orvexorm/` include pattern in your `fxmanifest.lua`. All features (migrations, schema builder, introspection) are available through the direct import.
-:::
-
 ```lua title="your-resource/server.lua"
--- OrvexORM is available globally
+-- OrvexORM is a global table of your resource
 local User = OrvexORM.model("users", {
     identifier = "string",
     money      = "number",
@@ -83,16 +96,18 @@ local User = OrvexORM.model("users", {
 }, { primaryKey = "identifier" })
 ```
 
-**Option B: Via exports**
+### How the import works
 
-```lua title="your-resource/server.lua"
-local ORM = exports.orvexorm:lib()
+Every FiveM resource has its own Lua state. `lib/import.lua` reads the `server_script` list of orvexorm's `fxmanifest.lua` and runs those files **inside your resource**. As a result:
 
-local User = ORM.model("users", {
-    identifier = "string",
-    money      = "number",
-}, { primaryKey = "identifier" })
-```
+- `OrvexORM` is a real Lua table in your resource: instances (`player:update()`), query builders (`User.query():where()`) and transactions (`tx:insert()`) keep their methods. Every feature (migrations, schema builder, introspection, `OrvexAdapter`, `OrvexCache`) is available.
+- **Each resource has its own ORM instance**: its own cache, `OrvexORM.debug()`, `enableCache()` and adapter. Enabling the cache in resource A does not enable it in resource B, and a write made by B does not invalidate A's cache. If several resources write to the same tables, keep the cache off or use a short TTL.
+- Importing twice reloads nothing. Included on the client (`shared_script`), the file does nothing: the ORM is server only.
+- If the `orvexorm` resource is missing, the import fails with a message asking you to add `dependency 'orvexorm'`.
+
+:::danger Stop using `exports.orvexorm:lib()`
+The export is kept for backward compatibility, but FiveM exports go through msgpack, which **drops metatables**: rows returned by `find`/`findAll`, `User.query()` builders and the transaction `tx` arrive **without their methods** (`player:update` is `nil`). The first call prints a warning in the console. Replace it with `server_script '@orvexorm/lib/import.lua'`.
+:::
 
 ---
 
@@ -113,7 +128,7 @@ Replace:
 
 ## Create your tables
 
-You have **3 options**:
+You have **4 options**:
 
 ### Option A: `sync()` — Automatic creation
 
@@ -126,7 +141,9 @@ local User = OrvexORM.model("users", {
     job        = "string",
 }, { primaryKey = "identifier" })
 
-User.sync() -- Creates the table if it doesn't exist
+CreateThread(function()
+    User.sync() -- Creates the table if it doesn't exist
+end)
 ```
 
 ### Option B: Migrations
@@ -150,7 +167,9 @@ OrvexORM.migrations({
     },
 })
 
-OrvexORM.migrate()
+CreateThread(function()
+    OrvexORM.migrate()
+end)
 ```
 
 See the full guide: [Migrations](/docs/guides/migrations)
@@ -160,11 +179,13 @@ See the full guide: [Migrations](/docs/guides/migrations)
 If your table already exists, OrvexORM can detect it automatically:
 
 ```lua
--- Generate the model from the existing MySQL table
-local User = OrvexORM.fromTable("users")
+CreateThread(function()
+    -- Generate the model from the existing MySQL table (runs a DESCRIBE)
+    local User = OrvexORM.fromTable("users")
 
--- Or just retrieve the fields
-local fields, pk = OrvexORM.introspect("users")
+    -- Or just retrieve the fields
+    local fields, pk = OrvexORM.introspect("users")
+end)
 ```
 
 ### Option D: Manual SQL
@@ -190,7 +211,7 @@ Add this code to your resource to verify that everything works:
 
 ```lua
 Citizen.CreateThread(function()
-    local ORM = OrvexORM or exports.orvexorm:lib()
+    local ORM = OrvexORM  -- loaded by @orvexorm/lib/import.lua
     ORM.debug(true)  -- Enable SQL logs
 
     local User = ORM.model("users", {
@@ -203,9 +224,9 @@ Citizen.CreateThread(function()
 end)
 ```
 
-You should see in the console:
+You should see in the console (the first line comes from the `orvexorm` resource itself, at startup):
 ```
-[OrvexORM] v1.2.1 loaded — ready to use
+[OrvexORM] v1.3.0 loaded — ready to use
 [OrvexORM] Installation OK !
 ```
 

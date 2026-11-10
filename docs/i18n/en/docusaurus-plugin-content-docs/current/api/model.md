@@ -4,12 +4,60 @@ sidebar_position: 2
 
 # Model
 
-All methods available on a model created with `ORM.model()`.
+All the methods available on a model created with `ORM.model()`.
 
 ```lua
 local User = ORM.model("users", { ... })
 -- User is an OrvexModel
 ```
+
+---
+
+## Conventions
+
+These rules apply to every method on this page.
+
+### Return values
+
+| Family | Return |
+|---|---|
+| `update`, `updateWhere`, `delete`, `deleteWhere`, `forceDelete`, `restore`, `increment`, `decrement` | `integer`: the number of rows the driver reports as affected. `0` = nothing changed (no row matched). A number is always "truthy" in Lua: test `n > 0`, not `if n then`. |
+| `create`, `createWith` | The created instance |
+| `createMany`, `upsert` | `true` (an `INSERT` returns an id, not a row count) |
+| `find`, `first`, `findOrFail` | An instance, or `nil` (`findOrFail` raises an error) |
+| `findAll`, `all` | A list, possibly empty `{}` |
+
+### Errors
+
+Misuse **raises a Lua error** whose position points at **your** line of code (not inside the library):
+
+- `update` / `delete` / `forceDelete` / `restore` / `increment` / `decrement` without a `where` (or with `{}`): `update() requires a where clause`. This is on purpose, so the whole table is never hit by accident.
+- Invalid data (wrong type, unknown column): see [Validation](/docs/guides/validation). When several fields are invalid, the one reported is the first in alphabetical order, always the same.
+- `restore` on a model without `softDelete`; unknown relation; invalid SQL identifier.
+
+A SQL error reported by the driver is a Lua error too. Use `pcall` to catch them.
+
+### Argument order
+
+The API has a few historical irregularities, kept for backward compatibility:
+
+| Methods | Order |
+|---|---|
+| `update(data, where)` | **data** then where (like `instance:update(data)`) |
+| `updateWhere(where, data)` | **where** then data (alias of `update`, reversed order) |
+| `count(where?)` | **where** only |
+| `sum / avg / min / max(column, where?)` | **column** then where |
+| `increment / decrement(column, amount, where)` | `amount` **required** (on the instance, `instance:increment(column, amount?)` defaults to 1) |
+| `find(where?, opts?)` / `findAll(where?, opts?)` | `where` optional: `findAll()` = the whole table, `find()` = the first row |
+| Column selection | `opts.select` of `find`/`findAll` takes an **array** (`{ "identifier", "money" }`) or a comma-separated string (`"identifier, money"`); the builder's `:select()` takes a **string** |
+
+### Async
+
+Every method that reads or writes waits for the database: call it from a thread, an event or a command ([Async and threads](/docs/getting-started#async-and-threads)). Defining a model, a relation, a scope or a hook runs no query.
+
+### The caller's data is not modified
+
+`create`, `createMany`, `upsert`, `update` and the `before*` hooks work on a **copy** of your table: you can reuse a data template without it receiving `created_at` or a hook's changes.
 
 ---
 
@@ -25,9 +73,14 @@ local player = User.create({ identifier = "license:abc", money = 500 })
 
 ---
 
-### `Model.find(where, opts?)` → `OrvexInstance | nil`
+### `Model.find(where?, opts?)` → `OrvexInstance | nil`
 
-Returns the first matching row, or `nil`.
+Returns the first matching row, or `nil`. The query carries a `LIMIT 1`. `where` accepts operators (`{ money = { ">", 100 } }`); without `where`, returns the first row of the table.
+
+| Option | Type | Description |
+|---|---|---|
+| `include` | `string[]` | Relations to load at the same time (eager loading) |
+| `select` | `string[]` or `string` | Columns to read (plain names, validated and quoted; a string is split on commas); the primary key is always added |
 
 ```lua
 local player = User.find({ identifier = "license:abc" })
@@ -40,69 +93,70 @@ local player = User.find({ identifier = "license:abc" }, {
 
 ---
 
-### `Model.findAll(where, opts?)` → `OrvexInstance[]`
+### `Model.findAll(where?, opts?)` → `OrvexInstance[]`
 
-Returns all matching rows.
+Returns all matching rows (`{}` if none). Without `where`, returns the whole table. Same options as `find`.
 
 ```lua
 local cops = User.findAll({ job = "police" })
 ```
 
-With `opts.include`, relations are eager-loaded in **batch**: a single `WHERE fk IN (...)` query per relation instead of one query per instance (no N+1). Works for `hasOne`, `hasMany`, and `belongsTo` (`belongsToMany` falls back to per-instance loading).
+With `opts.include`, relations are loaded with **batched eager loading**: a single query per relation, whatever the number of results (no N+1 problem). `hasOne`, `hasMany` and `belongsTo` use `WHERE fk IN (...)`, `belongsToMany` a single join on the pivot table for all parents.
 
 ```lua
 local cops = User.findAll({ job = "police" }, {
-    include = { "vehicles" }
+    include = { "profile", "vehicles" }
 })
--- 2 queries total: 1 for users, 1 for all their vehicles
+
+for _, cop in ipairs(cops) do
+    print(cop.profile.bio)   -- already loaded
+    print(#cop.vehicles)     -- already loaded
+end
 ```
 
 ---
 
 ### `Model.all(opts?)` → `OrvexInstance[]`
 
-Returns all rows in the table. Shortcut for `Model.findAll({}, opts)`.
+Returns every row of the table. Shortcut for `Model.findAll({}, opts)`.
 
 ```lua
-local players = User.all()
+local everyone = User.all()
 
 -- With eager loading
-local players = User.all({ include = { "vehicles" } })
+local everyone = User.all({ include = { "vehicles" } })
 ```
 
 ---
 
 ### `Model.upsert(data)` → `boolean`
 
-Inserts or updates if the primary key already exists.
+Inserts, or updates if the primary key (or a unique key) already exists. With `timestamps = true`, `created_at` is **not** overwritten on existing rows: only the other fields are updated through `ON DUPLICATE KEY UPDATE`. Fires `beforeUpsert(data)` then `afterUpsert(data)`.
 
 ```lua
 User.upsert({ identifier = "license:abc", money = 2000 })
 ```
 
-:::info
-With `timestamps = true`, `created_at` is **not** overwritten when the row already exists — only the other fields are updated via `ON DUPLICATE KEY UPDATE`.
-:::
-
 ---
 
-### `Model.update(data, where)` → `boolean`
+### `Model.update(data, where)` → `integer`
 
-Updates the rows matching `where`.
+Updates the rows matching `where` and returns the affected row count. Fires `beforeBulkUpdate(data, where)` then `afterBulkUpdate(data, where, affected)`.
 
 ```lua
-User.update({ money = 0 }, { job = "unemployed" })
+local n = User.update({ money = 0 }, { job = "unemployed" })
+print(n .. " player(s) reset")
 ```
 
 :::caution
-The `where` parameter is **required** and must be non-empty to prevent updating the entire table.
+The `where` parameter is **required** and must be non-empty, so the whole table is never modified by accident.
 :::
 
 ---
 
-### `Model.delete(where)` → `boolean`
+### `Model.delete(where)` → `integer`
 
-Deletes the rows matching `where`. If soft delete is enabled, marks the rows as deleted (sets `deleted_at`).
+Deletes the rows matching `where` and returns the affected row count. If soft delete is enabled, marks the rows as deleted (sets `deleted_at`). Fires `beforeBulkDelete(where)` then `afterBulkDelete(where, affected)`.
 
 ```lua
 User.delete({ job = "unemployed" })
@@ -112,7 +166,7 @@ User.delete({ job = "unemployed" })
 
 ### `Model.createMany(rows)` → `boolean`
 
-Inserts multiple rows in a single query.
+Inserts several rows in a single query. Every row is validated; `beforeCreate` fires for each row (on a copy), then `afterBulkCreate(rows)` once. No instance is built.
 
 ```lua
 User.createMany({
@@ -126,12 +180,12 @@ User.createMany({
 
 ### `Model.findOrCreate(where, defaults?)` → `OrvexInstance, boolean`
 
-Finds a record, or creates it if it doesn't exist. Returns the instance and a `created` boolean.
+Looks up a record, or creates it (with `where` + `defaults`) if it does not exist. Returns the instance and a `created` boolean. It is not atomic: two simultaneous calls can both create the row unless a unique key prevents it.
 
 ```lua
 local player, created = User.findOrCreate(
-    { identifier = "license:abc" },        -- search condition
-    { money = 500, job = "unemployed" }     -- default values if created
+    { identifier = "license:abc" },        -- lookup condition
+    { money = 500, job = "unemployed" }     -- default values on creation
 )
 
 if created then
@@ -143,31 +197,31 @@ end
 
 ### `Model.updateOrCreate(where, data)` → `OrvexInstance, boolean`
 
-Updates an existing record, or creates a new one.
+Updates an existing record (through `instance:update`, so `beforeUpdate`/`afterUpdate`), or creates a new one (`beforeCreate`/`afterCreate`).
 
 ```lua
 local player, created = User.updateOrCreate(
-    { identifier = "license:abc" },   -- search condition
+    { identifier = "license:abc" },   -- lookup condition
     { money = 1000, job = "police" }  -- data to update or create
 )
 ```
 
 ---
 
-### `Model.increment(column, amount, where)` → `boolean`
+### `Model.increment(column, amount, where)` → `integer`
 
-Increments a numeric column.
+Increments a numeric column, atomically on the MySQL side (`money = money + ?`). `amount` is required. No hook fires.
 
 ```lua
 User.increment("money", 100, { identifier = "license:abc" })
--- SQL: UPDATE users SET money = money + 100 WHERE identifier = ?
+-- SQL: UPDATE `users` SET `money` = `money` + ? WHERE `identifier` = ?
 ```
 
 ---
 
-### `Model.decrement(column, amount, where)` → `boolean`
+### `Model.decrement(column, amount, where)` → `integer`
 
-Decrements a numeric column.
+Decrements a numeric column (`amount` required, no hook).
 
 ```lua
 User.decrement("money", 50, { identifier = "license:abc" })
@@ -175,9 +229,74 @@ User.decrement("money", 50, { identifier = "license:abc" })
 
 ---
 
-### `Model.forceDelete(where)` → `boolean`
+### `Model.findOrFail(where, opts?)` → `OrvexInstance`
 
-Permanently deletes (ignores soft delete).
+Like `find()`, but raises an error if no record is found.
+
+```lua
+local player = User.findOrFail({ identifier = "license:abc" })
+-- Error if not found: "Record not found in 'users' where identifier=license:abc"
+```
+
+---
+
+### `Model.first(where?)` → `OrvexInstance | nil`
+
+Returns the first matching record. Shortcut for `query():where(...):first()`.
+
+```lua
+local cop = User.first({ job = "police" })
+local anyone = User.first()  -- first of the table
+```
+
+---
+
+### `Model.exists(where)` → `boolean`
+
+Checks whether a record exists without loading the data.
+
+```lua
+if User.exists({ identifier = "license:abc" }) then
+    print("The player exists")
+end
+```
+
+---
+
+### `Model.pluck(column, where?)` → `any[]`
+
+Returns an array with only the values of one column.
+
+```lua
+local jobs = User.pluck("job")                         -- every job
+local moneys = User.pluck("money", { job = "police" }) -- officers' money
+```
+
+---
+
+### `Model.updateWhere(where, data)` → `integer`
+
+Alias of `update(data, where)` with the arguments **in reversed order** (where first). Same hooks and same return value.
+
+```lua
+User.updateWhere({ identifier = "license:abc" }, { money = 9999 })
+```
+
+---
+
+### `Model.deleteWhere(where)` → `integer`
+
+Alias of `delete(where)`.
+
+```lua
+User.deleteWhere({ job = "unemployed" })
+```
+
+---
+
+### `Model.forceDelete(where)` → `integer`
+
+Deletes permanently (ignores soft delete). Fires the `beforeBulkDelete` / `afterBulkDelete` hooks.
 
 ```lua
 User.forceDelete({ identifier = "license:old" })
@@ -185,9 +304,9 @@ User.forceDelete({ identifier = "license:old" })
 
 ---
 
-### `Model.restore(where)` → `boolean`
+### `Model.restore(where)` → `integer`
 
-Restores soft-deleted rows.
+Restores soft-deleted rows (sets `deleted_at` back to `NULL`). Requires `softDelete = true` and a non-empty `where`. No hook fires.
 
 ```lua
 User.restore({ identifier = "license:abc" })
@@ -197,10 +316,10 @@ User.restore({ identifier = "license:abc" })
 
 ### `Model.createWith(data)` → `OrvexInstance`
 
-Creates a record with nested relations (nested writes). Relation keys are automatically detected.
+Creates a record with nested relations (nested writes). Relation keys are detected automatically.
 
 ```lua
--- Define relations
+-- Define the relations
 User.hasOne("profile", Profile, { foreignKey = "user_id" })
 User.hasMany("vehicles", Vehicle, { foreignKey = "owner_id" })
 
@@ -209,7 +328,7 @@ local player = User.createWith({
     identifier = "license:abc",
     money      = 500,
     -- Nested hasOne
-    profile = { bio = "Hello!", avatar = "avatar.png" },
+    profile = { bio = "Hi!", avatar = "avatar.png" },
     -- Nested hasMany
     vehicles = {
         { plate = "ABC123", model = "sultan" },
@@ -218,32 +337,39 @@ local player = User.createWith({
 })
 ```
 
-This executes 4 queries:
-1. `INSERT INTO users ...`
-2. `INSERT INTO profiles (user_id, bio, avatar) ...`
-3. `INSERT INTO vehicles (owner_id, plate, model) ...`
-4. `INSERT INTO vehicles (owner_id, plate, model) ...`
+How it runs:
+1. Every nested row is **validated first**: invalid data writes nothing.
+2. `INSERT INTO users ...` (through `create`, so with its hooks).
+3. The `hasOne` / `hasMany` rows receive the foreign key, go through their model's `beforeCreate` hooks (on a copy, once per row), then are sent in **a single transaction**, as multi-row `INSERT`s (one query per table): here `INSERT INTO profiles ...` and `INSERT INTO vehicles ... VALUES (...), (...)`.
+4. For `belongsToMany`, each related row is created with `create` (its id is needed, so its hooks fire), then the pivot rows are inserted in the same transaction.
+5. Once the transaction is committed, `afterBulkCreate(rows)` fires once per `hasOne` / `hasMany` relation on the child model. `afterCreate` does **not** fire for those rows: no instance is built (their id is not known).
+
+If the transaction fails, the rows already created (the parent and the `belongsToMany` rows) are **deleted**, then the error is raised: `createWith('users'): nested rows were not written, created rows removed: ...`. If one of those deletes fails in turn, the message says so and lists the rows left in the database (`these created rows could not be removed: users#12: ...`). `belongsTo` entries are ignored.
+
+:::warning Not fully atomic
+Only the `hasOne` / `hasMany` rows and the pivot rows are in the transaction. The parent and the `belongsToMany` rows are created **before** it, each by its own query: during that short window other queries can read them, and on failure they are removed by compensating `DELETE`s, not by a rollback. If everything must be atomic, write the rows yourself inside `OrvexORM.transaction(function(tx) ... end)`.
+:::
 
 ---
 
 ### `Model.whereHas(relationName, callback?)` → `OrvexBuilder`
 
-Filters records that have at least one related record. Uses `WHERE EXISTS` in SQL.
+Filters the records that have at least one related record. Uses `WHERE EXISTS` in SQL. Soft-deleted related rows (when the related model has `softDelete`) do not count. For `belongsToMany`, the callback filters the **related** table (joined to the pivot table). An `orWhere` inside the callback stays tied to the parent row.
 
 ```lua
--- Players who have at least one vehicle
+-- Players who own at least one vehicle
 local players = User.whereHas("vehicles"):get()
 
--- Players who have a vehicle with plate "ABC123"
+-- Players who own a vehicle with plate "ABC123"
 local players = User.whereHas("vehicles", function(b)
     b:where({ plate = "ABC123" })
 end):get()
 ```
 
-**Generated SQL:**
+**Generated SQL (simplified):**
 ```sql
-SELECT * FROM users WHERE EXISTS (
-    SELECT 1 FROM vehicles WHERE vehicles.owner_id = users.identifier
+SELECT * FROM `users` WHERE EXISTS (
+    SELECT 1 FROM `vehicles` WHERE `vehicles`.`owner_id` = `users`.`identifier`
 )
 ```
 
@@ -251,7 +377,7 @@ SELECT * FROM users WHERE EXISTS (
 
 ### `Model.countByRelation(relationName, where?)` → `table`
 
-Counts related records for each parent record. Uses a **single `GROUP BY` query** instead of one `COUNT` query per record.
+Counts the related records of each parent record. Uses a **single** `GROUP BY` query for all parents at once (instead of one `COUNT` per parent). Soft-deleted related rows are not counted. Not supported for `belongsTo`.
 
 ```lua
 local results = User.countByRelation("vehicles", { job = "police" })
@@ -259,7 +385,7 @@ local results = User.countByRelation("vehicles", { job = "police" })
 for _, entry in ipairs(results) do
     print(entry.instance.identifier .. " has " .. entry.count .. " vehicle(s)")
 end
--- Each instance also has a _count_vehicles field
+-- Each instance also gets a _count_vehicles field
 ```
 
 ---
@@ -286,9 +412,11 @@ See the [full Builder reference](/docs/api/builder).
 
 ### `Model.count(where?)` → `integer`
 
+Excludes soft-deleted rows. Mind the order: `count` takes the `where` first, the other aggregations take the column first.
+
 ```lua
-User.count()                    -- all
-User.count({ job = "police" }) -- with filter
+User.count()                   -- all
+User.count({ job = "police" }) -- filtered
 ```
 
 ### `Model.sum(column, where?)` → `number`
@@ -322,7 +450,7 @@ User.max("money")
 
 ### `Model.sync()`
 
-Creates the model's table if it doesn't exist. Automatically generates the `CREATE TABLE IF NOT EXISTS` SQL from the schema.
+Creates the model's table if it does not exist. Generates the `CREATE TABLE IF NOT EXISTS` SQL from the schema automatically. With `timestamps = true`, adds `created_at` / `updated_at`; with `softDelete = true`, adds `deleted_at`. If the primary key is **not declared** in `fields`, a `` `<primaryKey>` INT UNSIGNED NOT NULL AUTO_INCREMENT `` column is added first (like `t:id()`). An existing table is never modified.
 
 ```lua
 local User = ORM.model("users", {
@@ -331,14 +459,16 @@ local User = ORM.model("users", {
     job        = "string",
 }, { primaryKey = "identifier" })
 
-User.sync() -- Creates the "users" table if it doesn't exist
+CreateThread(function()
+    User.sync() -- Creates the "users" table if it does not exist
+end)
 ```
 
 ---
 
 ### `Model.flushCache()`
 
-Flushes the cache for this model.
+Clears this model's cache entries (its table only).
 
 ```lua
 User.flushCache()
@@ -395,7 +525,7 @@ Vehicle.belongsTo("owner", User, { foreignKey = "owner_id" })
 
 ### `Model.belongsToMany(name, relatedModel, opts)`
 
-Defines an N → N relation via a pivot table.
+Defines an N → N relation through a pivot table.
 
 | Option | Type | Description |
 |---|---|---|
@@ -414,27 +544,49 @@ User.belongsToMany("roles", Role, {
 
 ---
 
-## Model Options
+## Model options
 
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `primaryKey` | `string` | `"id"` | Name of the primary key |
 | `softDelete` | `boolean` | `false` | Enables soft delete (`deleted_at` column) |
-| `timestamps` | `boolean` | `false` | Auto-manages `created_at` and `updated_at` |
+| `timestamps` | `boolean` | `false` | Manages `created_at` and `updated_at` automatically |
+| `hooks` | `table` | `nil` | Inline hooks `{ beforeCreate = fn, ... }`, one per event (see [Hooks](#hooks-lifecycle)) |
+| `scopes` | `table` | `nil` | Inline scopes `{ rich = fn, ... }` |
+| `relations` | `function` | `nil` | Callback that declares the relations `function(M) ... end` |
+| `adapter` | `OrvexAdapter` | default | Adapter of this model only |
+| `cache` | `OrvexCache` | global cache | Cache of this model only (see [Cache](/docs/guides/cache#one-cache-per-model)) |
+
+With `timestamps` or `softDelete`, the `created_at`, `updated_at` and `deleted_at` columns are accepted by validation even if you do not declare them in `fields`.
 
 ```lua
 local User = ORM.model("users", { ... }, {
     primaryKey = "identifier",
     softDelete = true,
     timestamps = true,
+    hooks = {
+        beforeCreate = function(data)
+            data.money = data.money or 500
+        end,
+    },
+    scopes = {
+        rich = function(b) b:where("money", ">", 10000) end,
+        cops = function(b) b:where({ job = "police" }) end,
+    },
+    relations = function(M)
+        M.hasMany("vehicles", Vehicle, { foreignKey = "owner_id" })
+    end,
 })
+
+-- Call once every model has been created
+User.applyRelations()
 ```
 
 ---
 
 ## Soft Delete
 
-When `softDelete = true`, deletions mark the row with `deleted_at` instead of actually deleting it.
+With `softDelete = true`, deletions mark the row with `deleted_at` instead of removing it.
 
 ```lua
 local User = ORM.model("users", { ... }, { softDelete = true })
@@ -442,16 +594,16 @@ local User = ORM.model("users", { ... }, { softDelete = true })
 -- Soft delete (sets deleted_at)
 User.delete({ identifier = "license:abc" })
 
--- Permanently delete
+-- Permanent delete
 User.forceDelete({ identifier = "license:abc" })
 
 -- Restore a deleted record
 User.restore({ identifier = "license:abc" })
 
--- Query builder: include deleted records
+-- Query builder: include the deleted rows
 User.withTrashed():get()
 
--- Query builder: only deleted records
+-- Query builder: only the deleted rows
 User.onlyTrashed():get()
 ```
 
@@ -459,7 +611,27 @@ User.onlyTrashed():get()
 
 ## Hooks (Lifecycle)
 
-Hooks allow you to execute code before/after CRUD operations.
+Hooks run code before/after writes. Writes **on an instance** fire the instance hooks; **class-level** writes (`User.update(data, where)`...) act on a `where` clause without loading the rows, so they fire the **bulk** hooks, which receive the data and the clause instead of an instance.
+
+| Hook | Arguments | Fired by |
+|---|---|---|
+| `beforeCreate` | `data` | `create`, `createMany` and `createWith` (once per row), `findOrCreate`, `updateOrCreate` |
+| `afterCreate` | `instance` | `create`, `findOrCreate`, `updateOrCreate` |
+| `afterBulkCreate` | `rows` | `createMany`, `createWith` (`hasOne` / `hasMany` rows, once per relation) |
+| `beforeUpdate` | `instance, data` | `instance:update`, `updateOrCreate` |
+| `afterUpdate` | `instance` | `instance:update`, `updateOrCreate` |
+| `beforeDelete` | `instance` | `instance:delete`, `instance:forceDelete` |
+| `afterDelete` | `instance` | `instance:delete`, `instance:forceDelete` |
+| `beforeBulkUpdate` | `data, where` | `update`, `updateWhere` |
+| `afterBulkUpdate` | `data, where, affected` | `update`, `updateWhere` |
+| `beforeBulkDelete` | `where` | `delete`, `deleteWhere`, `forceDelete` |
+| `afterBulkDelete` | `where, affected` | `delete`, `deleteWhere`, `forceDelete` |
+| `beforeUpsert` | `data` | `upsert` |
+| `afterUpsert` | `data` | `upsert` |
+
+`before*` hooks receive a **copy** of the data and may modify it (add a field, change a value): that copy is what gets validated and written. A column added by a hook must exist in the schema (or be a managed column, see [Validation](/docs/guides/validation#unknown-columns)). **No hook** fires for `increment` / `decrement`, `restore`, the `tx:*` transaction methods, `OrvexORM.raw` / `rawExec`. The nested rows `createWith` inserts in batch fire `beforeCreate` and `afterBulkCreate`, not `afterCreate`. The list of events is exposed as `OrvexModelFactory.HOOK_EVENTS`.
+
+Every event has a shortcut (`User.beforeCreate(fn)`), and `User.hook(event, fn)` works for all of them. Several hooks per event run in registration order.
 
 ```lua
 User.beforeCreate(function(data)
@@ -485,13 +657,22 @@ end)
 User.afterDelete(function(instance)
     print("Deleted!")
 end)
+
+-- Class-level writes
+User.beforeBulkUpdate(function(data, where)
+    data.updated_by = "admin"  -- column declared in the schema
+end)
+
+User.afterBulkDelete(function(where, affected)
+    print(("%d row(s) deleted"):format(affected))
+end)
 ```
 
 ---
 
 ## Scopes
 
-Scopes are reusable filters for the query builder.
+Scopes are reusable filters for the query builder. Once defined, a scope becomes **directly callable as a model method**.
 
 ```lua
 -- Define a scope
@@ -499,11 +680,31 @@ User.scope("rich", function(b)
     b:where("money", ">", 10000)
 end)
 
-User.scope("police", function(b)
+User.scope("cops", function(b)
     b:where({ job = "police" })
 end)
 
--- Use a scope
+-- Use a scope as a direct method
+local richPlayers = User.rich():get()
+local copPlayers  = User.cops():get()
+
+-- Chainable with other conditions
+local richCops = User.rich():where({ job = "police" }):get()
+
+-- Or through scoped() (older syntax, still supported)
 local richPlayers = User.scoped("rich"):get()
-local richCops = User.scoped("rich"):where({ job = "police" }):get()
+```
+
+You can also declare scopes inline in the model definition:
+
+```lua
+local User = ORM.model("users", { ... }, {
+    scopes = {
+        rich = function(b) b:where("money", ">", 10000) end,
+        cops = function(b) b:where({ job = "police" }) end,
+    },
+})
+
+-- Ready to use!
+User.rich():limit(10):get()
 ```

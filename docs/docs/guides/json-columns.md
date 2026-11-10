@@ -154,6 +154,10 @@ for _, item in ipairs(inv.items) do
 end
 ```
 
+:::caution Transactions et SQL brut
+L'encodage JSON est fait par le modele. Les methodes `tx:insert` / `tx:update` des [transactions](/docs/guides/transactions) et `OrvexORM.raw` / `rawExec` ne passent pas par le modele : encode toi-meme avec `json.encode(valeur)`, et decode les lignes de `OrvexORM.raw` avec `json.decode`.
+:::
+
 ### Table SQL recommandee
 
 Pour les colonnes JSON, utilise le type `JSON` ou `LONGTEXT` en MySQL :

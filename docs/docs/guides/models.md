@@ -138,9 +138,30 @@ local Inventory = OrvexORM.model("inventories", {
 }, { primaryKey = "id" })
 ```
 
+## Colonnes aux noms reserves
+
+Les noms de colonnes et de tables sont toujours entoures de backticks dans le SQL genere : une colonne `group`, `key`, `order` ou `rank` (comme dans l'exemple *Joueurs* ci-dessus) fonctionne sans precaution. Les noms ne peuvent contenir que des lettres, des chiffres, `_` et `.`.
+
+## Ce que le schema controle
+
+Le schema (`fields`) n'est pas qu'une indication : une ecriture avec une cle absente du schema est **refusee** (`Unknown field 'x'`). Declare toutes les colonnes que tu ecris. Seules exceptions : `created_at` / `updated_at` avec `timestamps = true` et `deleted_at` avec `softDelete = true`, que l'ORM gere. Voir [Validation](/docs/guides/validation#colonnes-inconnues).
+
+## Toutes les options
+
+| Option | Defaut | Role |
+|---|---|---|
+| `primaryKey` | `"id"` | Colonne qui identifie une ligne |
+| `timestamps` | `false` | Remplit `created_at` / `updated_at` |
+| `softDelete` | `false` | `delete()` remplit `deleted_at` au lieu de supprimer |
+| `hooks` | `nil` | Un hook par evenement (voir [Hooks](/docs/api/model#hooks-lifecycle)) |
+| `scopes` | `nil` | Filtres reutilisables, appelables comme methodes |
+| `relations` | `nil` | Callback de declaration des relations, lancee par `applyRelations()` |
+| `adapter` | defaut | Adaptateur propre a ce modele |
+| `cache` | cache global | Cache propre a ce modele (voir [Cache](/docs/guides/cache#un-cache-par-modele)) |
+
 ## Hooks et Scopes inline
 
-Tu peux declarer les hooks et scopes directement dans la definition du modele :
+Tu peux declarer les hooks et scopes directement dans la definition du modele (un seul hook par evenement dans `hooks` ; utilise `User.hook(event, fn)` pour en ajouter d'autres) :
 
 ```lua
 local User = OrvexORM.model("users", {
@@ -155,6 +176,10 @@ local User = OrvexORM.model("users", {
         end,
         afterDelete = function(instance)
             print("Joueur supprime : " .. instance.identifier)
+        end,
+        -- Ecriture de classe (User.update(data, where)) : pas d'instance
+        afterBulkUpdate = function(data, where, affected)
+            print(affected .. " joueur(s) modifie(s)")
         end,
     },
     scopes = {

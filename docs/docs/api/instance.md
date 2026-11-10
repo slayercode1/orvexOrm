@@ -19,13 +19,21 @@ print(player.money)        -- 500
 print(player.job)          -- "police"
 ```
 
+Une instance ne contient que les colonnes de la ligne (plus les relations chargees et les `_count_*`) : `pairs(player)` ne parcourt que tes donnees. Les methodes et le contexte du modele sont partages par toutes les instances via une metatable unique.
+
+:::caution Colonnes nommees comme une methode
+Une colonne qui porte le nom d'une methode d'instance (`update`, `delete`, `get`, `refresh`, `restore`, `increment`, `toTable`...) ne masque plus la methode : `player:update()` appelle toujours la methode. Lis la valeur de la colonne avec `player:getAttribute("update")` ; `toTable()` l'inclut.
+:::
+
+Les methodes d'ecriture retournent le **nombre de lignes touchees** (`0` si la ligne n'existe plus), comme les methodes de classe. Voir les [conventions](/docs/api/model#conventions).
+
 ---
 
 ## Methodes
 
-### `instance:update(data)` → `boolean`
+### `instance:update(data)` → `integer`
 
-Met a jour cette ligne dans la base de donnees. L'objet local est aussi mis a jour.
+Met a jour cette ligne dans la base de donnees et retourne le nombre de lignes touchees. L'objet local est aussi mis a jour. Les donnees sont validees, et `updated_at` est mis a jour si `timestamps = true`. Declenche `beforeUpdate(instance, data)` puis `afterUpdate(instance)`. Si `data` change la cle primaire, l'instance suit : les ecritures suivantes ciblent la nouvelle valeur.
 
 ```lua
 player:update({ money = 1000, job = "medic" })
@@ -34,14 +42,14 @@ print(player.money)  -- 1000 (mis a jour localement aussi)
 
 **SQL genere :**
 ```sql
-UPDATE users SET job = ?, money = ? WHERE identifier = ?
+UPDATE `users` SET `job` = ?, `money` = ? WHERE `identifier` = ?
 ```
 
 ---
 
-### `instance:delete()` → `boolean`
+### `instance:delete()` → `integer`
 
-Supprime cette ligne de la base de donnees.
+Supprime cette ligne de la base de donnees (ou remplit `deleted_at` si le modele a `softDelete`). Declenche `beforeDelete` / `afterDelete`.
 
 ```lua
 player:delete()
@@ -49,7 +57,7 @@ player:delete()
 
 **SQL genere :**
 ```sql
-DELETE FROM users WHERE identifier = ?
+DELETE FROM `users` WHERE `identifier` = ?
 ```
 
 ---
@@ -57,6 +65,8 @@ DELETE FROM users WHERE identifier = ?
 ### `instance:get(relationName)` → `OrvexInstance | OrvexInstance[] | nil`
 
 Recupere les donnees liees par une relation.
+
+Une requete est faite a chaque appel (utilise `include` pour charger d'avance). Si la cle de liaison de l'instance vaut `nil`, aucune requete n'est faite : `nil` pour `hasOne`/`belongsTo`, `{}` pour les relations multiples. Les lignes liees supprimees en douceur sont exclues.
 
 Le type de retour depend de la relation :
 
@@ -89,7 +99,7 @@ Le nom passe a `:get()` doit correspondre exactement au nom utilise lors de la d
 
 ### `instance:attach(relationName, relatedInstance)` → `boolean`
 
-Ajoute un lien dans la table pivot d'une relation `belongsToMany`.
+Ajoute un lien dans la table pivot d'une relation `belongsToMany` et invalide le cache de la table pivot. Retourne `true`.
 
 ```lua
 local adminRole = Role.find({ name = "admin" })
@@ -122,9 +132,9 @@ DELETE FROM user_roles WHERE role_id = ? AND user_id = ?
 
 ---
 
-### `instance:increment(column, amount?)` → `boolean`
+### `instance:increment(column, amount?)` → `integer`
 
-Incremente une colonne numerique. `amount` est optionnel (defaut: 1).
+Incremente une colonne numerique cote MySQL (`money = money + ?`). `amount` est optionnel (defaut: 1), alors qu'il est obligatoire sur `Model.increment`. Aucun hook n'est declenche, la validation et `updated_at` ne s'appliquent pas.
 
 ```lua
 player:increment("money", 100)
@@ -135,12 +145,12 @@ player:increment("kills")  -- +1 par defaut
 
 **SQL genere :**
 ```sql
-UPDATE users SET money = money + 100 WHERE identifier = ?
+UPDATE `users` SET `money` = `money` + ? WHERE `identifier` = ?
 ```
 
 ---
 
-### `instance:decrement(column, amount?)` → `boolean`
+### `instance:decrement(column, amount?)` → `integer`
 
 Decremente une colonne numerique.
 
@@ -150,9 +160,9 @@ player:decrement("money", 50)
 
 ---
 
-### `instance:forceDelete()` → `boolean`
+### `instance:forceDelete()` → `integer`
 
-Supprime definitivement, meme si le soft delete est active.
+Supprime definitivement, meme si le soft delete est active. Declenche `beforeDelete` / `afterDelete`.
 
 ```lua
 player:forceDelete()
@@ -160,9 +170,9 @@ player:forceDelete()
 
 ---
 
-### `instance:restore()` → `boolean`
+### `instance:restore()` → `integer`
 
-Restaure une ligne supprimee en douceur. Necessite `softDelete = true`.
+Restaure une ligne supprimee en douceur. Necessite `softDelete = true`. Aucun hook n'est declenche.
 
 ```lua
 player:restore()
@@ -173,7 +183,7 @@ print(player.deleted_at)  -- nil
 
 ### `instance:toTable()` → `table`
 
-Retourne une copie "plate" de l'instance : une simple table Lua sans les champs internes (`_tableName`, `_adapter`, etc.) ni metatable. Les relations chargees en eager loading sont converties recursivement.
+Retourne une copie "plate" de l'instance : une simple table Lua avec toutes les colonnes (y compris celles nommees comme une methode), sans metatable. Les relations chargees en eager loading sont converties recursivement.
 
 Cas d'usage principal : envoyer les donnees au client via `TriggerClientEvent` ou les serialiser avec `json.encode`.
 
@@ -190,7 +200,7 @@ local jsonStr = json.encode(player:toTable())
 ```
 
 :::tip Pourquoi toTable ?
-Une instance contient des champs internes et une metatable qui ne survivent pas au passage reseau ni a `json.encode`. `toTable()` te donne une table propre, prete a etre envoyee.
+Une instance a une metatable, qui ne survit pas au passage reseau (msgpack) : les methodes seraient perdues, et une colonne nommee comme une methode serait absente. `toTable()` te donne une table propre, prete a etre envoyee.
 :::
 
 ---
@@ -211,4 +221,17 @@ if player:refresh() then
 else
     print("La ligne n'existe plus")
 end
+```
+
+---
+
+### `instance:getAttribute(name)` → `any`
+
+Lit une colonne, y compris une colonne nommee comme une methode d'instance (que `player[name]` resoudrait vers la methode).
+
+```lua
+local Setting = ORM.model("settings", { id = "number", update = "string" })
+local s = Setting.find({ id = 1 })
+print(s:getAttribute("update"))  -- valeur de la colonne `update`
+s:update({ update = "daily" })   -- appelle bien la methode
 ```

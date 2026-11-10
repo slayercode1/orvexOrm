@@ -10,6 +10,10 @@ sidebar_position: 5
 
 OrvexORM provides simple shortcuts that work directly on the model.
 
+:::caution Argument order
+`count(where?)` takes the filter first, whereas `sum`, `avg`, `min` and `max` take **the column first**: `User.sum("money", { job = "police" })`. Soft-deleted rows (`softDelete`) are excluded.
+:::
+
 ### `count` — Count
 
 ```lua
