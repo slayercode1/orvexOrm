@@ -280,7 +280,7 @@ Filtre les lignes ou la colonne n'est pas NULL.
 
 ### `:whereIn(column, values)`
 
-Filtre avec une liste de valeurs, liees en parametres. Une liste vide leve une erreur (`whereIn requires a non-empty array`) : teste `#values > 0` avant d'appeler. Tout autre type qu'un tableau leve une erreur : pour une sous-requete, utilise `:whereInSub()`.
+Filtre avec une liste de valeurs, liees en parametres. Une liste vide leve une erreur (`whereIn requires a non-empty array`) : teste `#values > 0` avant d'appeler. Tout autre type qu'un tableau leve une erreur : pour une sous-requete, utilise `:whereInSub()`. La liste est limitee a `OrvexBuilder.MAX_IN_VALUES` valeurs (10 000 par defaut) : au-dela, une erreur est levee avant tout envoi.
 
 ```lua
 :whereIn("job", { "police", "medic", "fire" })
@@ -553,7 +553,7 @@ Le tri du builder est remplace par celui de `column`. Un `:limit(n)` pose sur le
 
 ### `:paginate(page, perPage?)` → `table`
 
-Pagine les resultats automatiquement (2 requetes : un `count()` et la page). Retourne un objet avec les donnees et les metadonnees de pagination. Le total est juste aussi avec `distinct`, `groupBy` et `having`. `page` et `perPage` doivent etre des entiers >= 1 ; une page si grande que l'`OFFSET` deborderait leve une erreur.
+Pagine les resultats automatiquement (2 requetes : un `count()` et la page). Retourne un objet avec les donnees et les metadonnees de pagination. Le total est juste aussi avec `distinct`, `groupBy` et `having`. `page` et `perPage` doivent etre des entiers >= 1 ; une page si grande que l'`OFFSET` deborderait leve une erreur. `perPage` est limite a `OrvexBuilder.MAX_PER_PAGE` (1000 par defaut) : une valeur venue d'un joueur ne peut pas faire charger une table entiere.
 
 | Parametre | Type | Defaut | Description |
 |---|---|---|---|

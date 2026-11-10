@@ -280,7 +280,7 @@ Keeps the rows where the column is not NULL.
 
 ### `:whereIn(column, values)`
 
-Filters with a list of values, bound as parameters. An empty list raises an error (`whereIn requires a non-empty array`): check `#values > 0` before calling. Any type other than an array raises an error: for a subquery, use `:whereInSub()`.
+Filters with a list of values, bound as parameters. An empty list raises an error (`whereIn requires a non-empty array`): check `#values > 0` before calling. Any type other than an array raises an error: for a subquery, use `:whereInSub()`. The list is capped at `OrvexBuilder.MAX_IN_VALUES` values (10,000 by default): above that an error is raised before anything is sent.
 
 ```lua
 :whereIn("job", { "police", "medic", "fire" })
@@ -553,7 +553,7 @@ The builder's sort is replaced by the sort on `column`. A `:limit(n)` set on the
 
 ### `:paginate(page, perPage?)` → `table`
 
-Paginates the results automatically (2 queries: a `count()` and the page). Returns an object with the data and the pagination metadata. The total is correct with `distinct`, `groupBy` and `having` too. `page` and `perPage` must be integers >= 1; a page so large that the `OFFSET` would overflow raises an error.
+Paginates the results automatically (2 queries: a `count()` and the page). Returns an object with the data and the pagination metadata. The total is correct with `distinct`, `groupBy` and `having` too. `page` and `perPage` must be integers >= 1; a page so large that the `OFFSET` would overflow raises an error. `perPage` is capped at `OrvexBuilder.MAX_PER_PAGE` (1000 by default), so a value coming from a player cannot load a whole table.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|

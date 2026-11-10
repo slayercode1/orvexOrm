@@ -24,6 +24,8 @@ local UNBOUNDED_LIMIT = "18446744073709551615"
 ---@field or_flag? boolean
 
 ---@class OrvexBuilder
+---@field MAX_PER_PAGE integer paginate() perPage ceiling (default 1000)
+---@field MAX_IN_VALUES integer whereIn/whereNotIn list ceiling (default 10000)
 ---@field private _table string
 ---@field private _adapter OrvexAdapter
 ---@field private _wrapFn? fun(row: table): OrvexInstance
@@ -45,6 +47,13 @@ Builder.__index = Builder
 --- Operator condition for table-form where: `{ money = Builder.op(">", 100) }`
 --- (also ORM.op). A plain table value is never read as an operator.
 Builder.op = Helpers.op
+
+--- Upper bounds on caller-supplied sizes. Values often come from client net
+--- events, so an unbounded perPage or IN list would let a player make the
+--- server load or build arbitrarily large queries. Raise them on purpose if
+--- a trusted use needs more.
+Builder.MAX_PER_PAGE = 1000
+Builder.MAX_IN_VALUES = 10000
 
 ---@param tableName string
 ---@param adapter OrvexAdapter
@@ -321,6 +330,9 @@ local function addIn(self, method, operator, column, values)
         ("%s('%s') requires an array of values, got %s (use %sSub() for a subquery)")
             :format(method, column, type(values), method))
     assert(#values > 0, method .. " requires a non-empty array")
+    assert(#values <= Builder.MAX_IN_VALUES,
+        ("%s('%s') accepts at most %d values (Builder.MAX_IN_VALUES), got %d")
+            :format(method, column, Builder.MAX_IN_VALUES, #values))
     return andWhere(self, buildCondition(column, operator, values))
 end
 
@@ -924,6 +936,9 @@ end
 function Builder:paginate(page, perPage)
     page = toPositiveInteger(page or 1, "Page")
     perPage = toPositiveInteger(perPage or 15, "perPage")
+    ensure(perPage <= Builder.MAX_PER_PAGE,
+        ("paginate(): perPage must be at most %d (Builder.MAX_PER_PAGE), got %d")
+            :format(Builder.MAX_PER_PAGE, perPage))
     -- Lua integers wrap: a huge page would give a negative (or zero) OFFSET.
     ensure(page - 1 <= math.maxinteger // perPage,
         ("paginate(): page %d is too large for perPage %d"):format(page, perPage))

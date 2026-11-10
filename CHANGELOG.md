@@ -12,6 +12,9 @@ de comportement a verifier avant de mettre a jour sont regroupes dans
 
 ### Changements cassants
 
+- **Plafonds de taille.** `paginate()` refuse un `perPage` superieur a `OrvexBuilder.MAX_PER_PAGE`
+  (1000 par defaut) et `whereIn`/`whereNotIn` une liste de plus de `OrvexBuilder.MAX_IN_VALUES`
+  valeurs (10 000 par defaut). Les deux valeurs se relevent en les modifiant au demarrage.
 - **Import entre ressources.** `server_script '@orvexorm/lib/import.lua'` charge maintenant l'ORM
   **dans la ressource qui l'inclut** au lieu de passer par `exports.orvexorm:lib()`. Chaque ressource
   a donc sa propre instance : son cache, son `OrvexORM.debug()`, son `enableCache()` et son
@@ -143,6 +146,8 @@ de comportement a verifier avant de mettre a jour sont regroupes dans
 
 ### Changements
 
+- **CI.** luacheck et ses dependances sont telecharges, verifies par empreinte SHA-256 puis installes
+  depuis les fichiers locaux.
 - **Valeurs de retour** : `update`, `updateWhere`, `delete`, `deleteWhere`, `forceDelete`, `restore`,
   `increment`, `decrement` (classe et instance) retournent le **nombre de lignes touchees**
   (`0` = rien n'a change) au lieu de `true`. Un nombre restant vrai en Lua, `if User.update(...) then`
@@ -332,8 +337,6 @@ de comportement a verifier avant de mettre a jour sont regroupes dans
   passe jamais une table venue d'un client sans la filtrer.
 - Les transactions non atomiques (`allowNonAtomicTransactions`) gardent en base les requetes passees
   avant l'echec (seul le cache est invalide).
-- CI : luacheck est installe via `luarocks install` sans verification d'empreinte (la version est
-  epinglee, pas son contenu).
 
 ## [1.2.1]
 
