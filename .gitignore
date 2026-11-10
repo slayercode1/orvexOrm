@@ -23,6 +23,10 @@ desktop.ini
 .env
 .env.*
 credentials.json
+*.pem
+*.key
+# FiveM server config: holds mysql_connection_string and license keys
+server.cfg
 
 # AI tools
 .claude/

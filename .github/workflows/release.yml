@@ -45,6 +45,19 @@ jobs:
             echo "PRERELEASE=$PRERELEASE"
           } >> "$GITHUB_OUTPUT"
 
+      # A v* tag can be pushed on any commit: only commits already on main are released.
+      - name: Check the tagged commit is on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=${auth_header}" \
+            fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tag '$TAG_NAME' points to $GITHUB_SHA, which is not on main: merge it into main before tagging"
+            exit 1
+          fi
+
       # fxmanifest.lua is the single source of the version (ORM.version and
       # the docs label read it): the tag must match what is committed.
       - name: Check committed version matches the tag
@@ -97,17 +110,19 @@ jobs:
           else
             CHANGES=$(git log --pretty=format:"- %s" "${PREV_TAG}..HEAD")
           fi
-          cat > release-notes.md <<NOTES
-          ## OrvexORM v${VERSION}
-
-          ### Installation
-          1. Telecharge \`orvexorm-${VERSION}.zip\`
-          2. Extrait dans \`resources/\` de ton serveur FiveM
-          3. \`ensure orvexorm\` dans ton \`server.cfg\`
+          # Quoted heredoc and printf: commit subjects and the version are
+          # written as data, never expanded by the shell.
+          {
+            printf '## OrvexORM v%s\n\n### Installation\n' "$VERSION"
+            printf '1. Telecharge `orvexorm-%s.zip`\n' "$VERSION"
+            cat <<'NOTES'
+          2. Extrait dans `resources/` de ton serveur FiveM
+          3. `ensure orvexorm` dans ton `server.cfg`
 
           ### Changements
-          ${CHANGES}
           NOTES
+            printf '%s\n' "$CHANGES"
+          } > release-notes.md
 
       - name: Create release
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
