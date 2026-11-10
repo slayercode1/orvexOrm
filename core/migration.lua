@@ -35,6 +35,25 @@ local TYPE_MAP = {
     timestamp = "TIMESTAMP",
 }
 
+--- DEFAULT clause for a declared default. Only strings, booleans and finite
+--- numbers are accepted: anything else (a table with __tostring, NaN, ...)
+--- would be spliced into the DDL verbatim.
+---@param columnName string
+---@param default any
+---@return string
+local function defaultClause(columnName, default)
+    if type(default) == "string" then
+        return "DEFAULT " .. Helpers.quoteLiteral(default)
+    elseif type(default) == "boolean" then
+        return ("DEFAULT %s"):format(default and "1" or "0")
+    elseif Helpers.isFiniteNumber(default) then
+        return ("DEFAULT %s"):format(tostring(default))
+    end
+    error(("Invalid DEFAULT for column '%s': expected a string, a boolean or a finite number, got %s"):format(
+        columnName, type(default) == "number" and tostring(default) or type(default)
+    ), 0)
+end
+
 ---@param name string
 ---@param def string|OrvexColumnDef
 ---@param isPrimaryKey? boolean
@@ -82,13 +101,7 @@ local function columnToSQL(name, def, isPrimaryKey)
     end
 
     if default ~= nil then
-        if type(default) == "string" then
-            parts[#parts + 1] = "DEFAULT " .. Helpers.quoteLiteral(default)
-        elseif type(default) == "boolean" then
-            parts[#parts + 1] = ("DEFAULT %s"):format(default and "1" or "0")
-        else
-            parts[#parts + 1] = ("DEFAULT %s"):format(tostring(default))
-        end
+        parts[#parts + 1] = defaultClause(name, default)
     elseif nullable and not autoIncrement then
         parts[#parts + 1] = "DEFAULT NULL"
     end
@@ -565,41 +578,130 @@ function Migration.generateCreateSQL(tableName, fields, primaryKey)
     )
 end
 
----@param adapter OrvexAdapter
-function Migration.ensureTrackingTable(adapter)
-    local sql = [[CREATE TABLE IF NOT EXISTS `orvex_migrations` (
+-- ─── Tracking table ─────────────────────────────────────────────────
+-- orvex_migrations is shared by every resource on the database. Each row
+-- records the resource that applied it; rows written before that column
+-- existed keep LEGACY_RESOURCE and belong to whichever caller lists them.
+-- Names stay globally unique (UNIQUE `name`), so a name already recorded by
+-- another resource is rejected instead of being silently skipped.
+
+local LEGACY_RESOURCE = ""
+
+local TRACKING_TABLE_SQL = [[CREATE TABLE IF NOT EXISTS `orvex_migrations` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
   `name` VARCHAR(255) NOT NULL,
+  `resource` VARCHAR(255) NOT NULL DEFAULT '',
   `batch` INT NOT NULL DEFAULT 1,
   `executed_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `name` (`name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4]]
-    adapter:scalar(sql, {})
+
+local RESOURCE_COLUMN_EXISTS_SQL = "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+    .. "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'orvex_migrations' AND COLUMN_NAME = 'resource'"
+
+local ADD_RESOURCE_COLUMN_SQL = "ALTER TABLE `orvex_migrations` ADD COLUMN `resource` VARCHAR(255) NOT NULL DEFAULT '' AFTER `name`"
+
+--- Runs a write and raises when the driver fails, including when it
+--- swallows the error and returns nil (oxmysql).
+---@param adapter OrvexAdapter
+---@param sql string
+---@param params any[]
+---@param failureMessage string
+local function runCheckedWrite(adapter, sql, params, failureMessage)
+    local ok, result = pcall(adapter.scalar, adapter, sql, params)
+    if not ok or result == nil then
+        error(("[OrvexORM] %s: %s"):format(failureMessage, ok and "driver returned no result" or tostring(result)), 0)
+    end
+end
+
+--- Creates orvex_migrations, and adds the `resource` column to a table
+--- created by an older version.
+---@param adapter OrvexAdapter
+function Migration.ensureTrackingTable(adapter)
+    runCheckedWrite(adapter, TRACKING_TABLE_SQL, {}, "cannot create the orvex_migrations table")
+    local rows = adapter:execute(RESOURCE_COLUMN_EXISTS_SQL, {})
+    if not (rows and rows[1]) then
+        runCheckedWrite(adapter, ADD_RESOURCE_COLUMN_SQL, {}, "cannot add the resource column to orvex_migrations")
+    end
+end
+
+---@class OrvexMigrationRecord
+---@field id number
+---@field name string
+---@field batch number
+---@field resource string
+
+--- Every tracking row, oldest first.
+---@param adapter OrvexAdapter
+---@return OrvexMigrationRecord[]
+local function readRecords(adapter)
+    local rows = adapter:execute("SELECT id, name, batch, resource FROM orvex_migrations ORDER BY id", {}) or {}
+    local records = {}
+    for i, row in ipairs(rows) do
+        records[i] = {
+            id = tonumber(row.id) or i,
+            name = row.name,
+            batch = tonumber(row.batch) or 0,
+            resource = row.resource or LEGACY_RESOURCE,
+        }
+    end
+    return records
 end
 
 ---@param adapter OrvexAdapter
 ---@return table<string, boolean>
 function Migration.getApplied(adapter)
-    local rows = adapter:execute("SELECT name FROM orvex_migrations ORDER BY id", {})
     local applied = {}
-    if rows then
-        for _, row in ipairs(rows) do
-            applied[row.name] = true
-        end
-    end
+    for _, record in ipairs(readRecords(adapter)) do applied[record.name] = true end
     return applied
 end
 
+---@param records OrvexMigrationRecord[]
+---@return number
+local function highestBatch(records)
+    local batch = 0
+    for _, record in ipairs(records) do
+        if record.batch > batch then batch = record.batch end
+    end
+    return batch
+end
+
+--- Highest batch number recorded by any resource.
 ---@param adapter OrvexAdapter
 ---@return number
 function Migration.getCurrentBatch(adapter)
-    local rows = adapter:execute("SELECT MAX(batch) as batch FROM orvex_migrations", {})
-    if rows and rows[1] and rows[1].batch then
-        return tonumber(rows[1].batch) or 0
-    end
-    return 0
+    return highestBatch(readRecords(adapter))
 end
+
+---@param migrations OrvexMigration[]
+---@return table<string, OrvexMigration>
+local function indexByName(migrations)
+    local byName = {}
+    for _, mig in ipairs(migrations) do byName[mig.name] = mig end
+    return byName
+end
+
+---@param record OrvexMigrationRecord
+---@param resource string
+---@param migByName table<string, OrvexMigration>
+---@return boolean
+local function isOwnedBy(record, resource, migByName)
+    if record.resource == resource then return true end
+    return record.resource == LEGACY_RESOURCE and migByName[record.name] ~= nil
+end
+
+--- Resource the caller runs in: FiveM gives every resource its own copy of
+--- this module (lib/import.lua), so GetCurrentResourceName() names the caller.
+---@return string
+local function currentResourceName()
+    if type(GetCurrentResourceName) == "function" then
+        return GetCurrentResourceName() or LEGACY_RESOURCE
+    end
+    return LEGACY_RESOURCE
+end
+
+-- ─── migrate / rollback ─────────────────────────────────────────────
 
 --- Runs one schema step (`up` or `down`) and every statement it produces.
 --- A driver that swallows a query error returns nil (oxmysql), so a nil
@@ -629,66 +731,104 @@ local function raiseStepFailure(action, doneVerb, mig, doneCount, err)
     ), 0)
 end
 
---- Applies pending migrations in order. Each migration runs under pcall:
---- on the first failure it is NOT recorded, the following ones are not run,
---- and an error naming it is raised.
+--- Migrations of the list not recorded yet. Raises, before anything runs,
+--- when a name is already recorded by another resource.
 ---@param migrations OrvexMigration[]
----@param adapter OrvexAdapter
----@return number count applied migrations
-function Migration.migrate(migrations, adapter)
-    Migration.ensureTrackingTable(adapter)
-    local applied = Migration.getApplied(adapter)
-    local batch = Migration.getCurrentBatch(adapter) + 1
-    local count = 0
+---@param records OrvexMigrationRecord[]
+---@param resource string
+---@return OrvexMigration[]
+local function pendingMigrations(migrations, records, resource)
+    local migByName = indexByName(migrations)
+    local recordByName = {}
+    for _, record in ipairs(records) do recordByName[record.name] = record end
 
+    local pending = {}
     for _, mig in ipairs(migrations) do
-        if not applied[mig.name] then
-            local ok, err = pcall(runSchemaStep, mig.up, adapter)
-            if not ok then raiseStepFailure("Migration", "applied", mig, count, err) end
-            adapter:scalar(
-                "INSERT INTO orvex_migrations (name, batch) VALUES (?, ?)",
-                { mig.name, batch }
-            )
-            count = count + 1
+        local record = recordByName[mig.name]
+        if not record then
+            pending[#pending + 1] = mig
+        elseif not isOwnedBy(record, resource, migByName) then
+            error(("[OrvexORM] Migration '%s' is already recorded by resource '%s': migration names are shared by every resource on the database, prefix them with your resource name"):format(
+                mig.name, record.resource
+            ), 0)
         end
     end
-
-    return count
+    return pending
 end
 
---- Rolls back the last batch, newest first. A failed `down` keeps its
---- migration recorded and raises, like migrate().
+--- Applies pending migrations in order, in a new batch recorded for
+--- `resource`. Each migration runs under pcall: on the first failure it is
+--- NOT recorded, the following ones are not run, and an error naming it is
+--- raised. A migration whose tracking row cannot be written raises too.
 ---@param migrations OrvexMigration[]
 ---@param adapter OrvexAdapter
----@return number count rolled back migrations
-function Migration.rollback(migrations, adapter)
+---@param resource? string defaults to GetCurrentResourceName()
+---@return number count applied migrations
+function Migration.migrate(migrations, adapter, resource)
+    resource = resource or currentResourceName()
     Migration.ensureTrackingTable(adapter)
-    local batch = Migration.getCurrentBatch(adapter)
-    if batch == 0 then return 0 end
+    local records = readRecords(adapter)
+    local pending = pendingMigrations(migrations, records, resource)
+    -- Not atomic: resources calling migrate() at the same instant may share
+    -- a batch number. Harmless, since rollback only touches the caller's rows.
+    local batch = highestBatch(records) + 1
 
-    local rows = adapter:execute(
-        "SELECT name FROM orvex_migrations WHERE batch = ? ORDER BY id DESC",
-        { batch }
-    )
-    if not rows or #rows == 0 then return 0 end
-
-    local migByName = {}
-    for _, mig in ipairs(migrations) do
-        migByName[mig.name] = mig
+    for index, mig in ipairs(pending) do
+        local applied = index - 1
+        local ok, err = pcall(runSchemaStep, mig.up, adapter)
+        if not ok then raiseStepFailure("Migration", "applied", mig, applied, err) end
+        runCheckedWrite(adapter,
+            "INSERT INTO orvex_migrations (name, batch, resource) VALUES (?, ?, ?)",
+            { mig.name, batch, resource },
+            ("migration '%s' was applied but could not be recorded (%d migration(s) applied before it)"):format(mig.name, applied)
+        )
     end
+    return #pending
+end
 
-    local count = 0
-    for _, row in ipairs(rows) do
-        local mig = migByName[row.name]
-        if mig then
-            local ok, err = pcall(runSchemaStep, mig.down, adapter)
-            if not ok then raiseStepFailure("Rollback", "rolled back", mig, count, err) end
-        end
-        adapter:scalar("DELETE FROM orvex_migrations WHERE name = ?", { row.name })
-        count = count + 1
+--- Caller's last batch, newest first: rows it owns, listed in `migrations`.
+---@param records OrvexMigrationRecord[]
+---@param migByName table<string, OrvexMigration>
+---@param resource string
+---@return OrvexMigrationRecord[]
+local function lastOwnedBatch(records, migByName, resource)
+    local owned = {}
+    for _, record in ipairs(records) do
+        if migByName[record.name] and isOwnedBy(record, resource, migByName) then owned[#owned + 1] = record end
     end
+    local batch = highestBatch(owned)
+    local lastBatch = {}
+    for i = #owned, 1, -1 do
+        if owned[i].batch == batch then lastBatch[#lastBatch + 1] = owned[i] end
+    end
+    return lastBatch
+end
 
-    return count
+--- Rolls back the caller's last batch, newest first. Only migrations listed
+--- in `migrations` and recorded for `resource` (or legacy rows) are
+--- touched. A failed `down` keeps its migration recorded and raises.
+---@param migrations OrvexMigration[]
+---@param adapter OrvexAdapter
+---@param resource? string defaults to GetCurrentResourceName()
+---@return number count rolled back migrations
+function Migration.rollback(migrations, adapter, resource)
+    resource = resource or currentResourceName()
+    Migration.ensureTrackingTable(adapter)
+    local migByName = indexByName(migrations)
+    local toRollBack = lastOwnedBatch(readRecords(adapter), migByName, resource)
+
+    for index, record in ipairs(toRollBack) do
+        local rolledBack = index - 1
+        local mig = migByName[record.name]
+        local ok, err = pcall(runSchemaStep, mig.down, adapter)
+        if not ok then raiseStepFailure("Rollback", "rolled back", mig, rolledBack, err) end
+        runCheckedWrite(adapter,
+            "DELETE FROM orvex_migrations WHERE name = ? AND resource = ?",
+            { record.name, record.resource },
+            ("migration '%s' was rolled back but its tracking row could not be deleted (%d migration(s) rolled back before it)"):format(mig.name, rolledBack)
+        )
+    end
+    return #toRollBack
 end
 
 ---@param tableName string

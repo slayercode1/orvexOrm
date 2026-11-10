@@ -109,8 +109,8 @@ T.match(dbLog[1].sql, "CREATE TABLE IF NOT EXISTS `sync_users`", "Model.sync: ru
 -- Test ORM.migrate() and ORM.rollback()
 reset()
 mockResults[1] = {} -- ensureTrackingTable (CREATE TABLE)
-mockResults[2] = {} -- getApplied (SELECT migrations) → empty
-mockResults[3] = { { batch = 0 } } -- getCurrentBatch
+mockResults[2] = { { COLUMN_NAME = "resource" } } -- resource column already there
+mockResults[3] = {} -- tracking rows → none applied
 
 ORM.migrations({
     {
