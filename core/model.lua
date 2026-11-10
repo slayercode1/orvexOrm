@@ -34,6 +34,7 @@ Model.HOOK_EVENTS = Hooks.EVENTS
 ---@field cache? OrvexCache
 ---@field softDelete? boolean
 ---@field timestamps? boolean
+---@field allowManagedColumns? boolean let callers set created_at / updated_at themselves (imports)
 ---@field hooks? OrvexHookMap one function per event (see lib/types/orvexorm.d.lua)
 ---@field scopes? table<string, fun(builder: OrvexBuilder)>
 ---@field relations? fun(model: OrvexModel)
@@ -62,7 +63,11 @@ local function newContext(tableName, fields, adapter, opts, cache)
     local timestamps = opts.timestamps or false
     return {
         tableName  = tableName,
-        schema     = SchemaLib.new(fields, { timestamps = timestamps, softDelete = softDelete }),
+        schema     = SchemaLib.new(fields, {
+            timestamps = timestamps,
+            softDelete = softDelete,
+            allowManagedColumns = opts.allowManagedColumns,
+        }),
         adapter    = adapter,
         cache      = cache or CacheLib.new({ enabled = false }),
         primaryKey = opts.primaryKey or "id",

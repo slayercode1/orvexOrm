@@ -197,7 +197,7 @@ local InlineScopeUser = ORM.model("inline_scope_users", {
     primaryKey = "identifier",
     scopes = {
         wealthy = function(b) b:where("money", ">", 50000) end,
-        active = function(b) b:where({ job = { "!=", "unemployed" } }) end,
+        active = function(b) b:where({ job = ORM.op("!=", "unemployed") }) end,
     },
 })
 

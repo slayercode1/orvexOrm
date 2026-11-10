@@ -56,14 +56,37 @@ function Serializer.encodeRow(data, encodeSet)
     return encoded
 end
 
+--- utils/logger.lua loads after this file: resolve it on use.
+---@return OrvexLogger|nil
+local function logger()
+    return OrvexLogger or (type(require) == "function" and require("utils.logger")) or nil
+end
+
+--- A malformed json column (written by raw SQL or an external tool) must
+--- not make every read of its row raise: the raw string is kept, as for
+--- 'auto', and a warning names the field (never its content).
+---@param value string
+---@param fieldName? string
+---@return any
+local function decodeJsonColumn(value, fieldName)
+    local ok, decoded = pcall(json.decode, value)
+    if ok then return decoded end
+    local log = logger()
+    if log then
+        log.warn("Malformed JSON in a json column, the raw string is returned", { field = fieldName })
+    end
+    return value
+end
+
 --- Note: oxmysql may return DATE/DATETIME/TIMESTAMP columns as Unix timestamp
 --- numbers instead of formatted strings.
 ---@param value any
 ---@param fieldType? OrvexFieldType
+---@param fieldName? string named in the warning of a malformed json value
 ---@return any
-function Serializer.decode(value, fieldType)
+function Serializer.decode(value, fieldType, fieldName)
     if fieldType == "json" and type(value) == "string" then
-        return json.decode(value)
+        return decodeJsonColumn(value, fieldName)
     end
 
     if fieldType == "auto" and looksLikeJSON(value) then

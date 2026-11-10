@@ -91,7 +91,7 @@ mockResults[1] = {
     { identifier = "license:rich1", money = 5000, job = "police" },
     { identifier = "license:rich2", money = 8000, job = "police" },
 }
-local richCops = User.findAll({ money = { ">", 1000 }, job = "police" })
+local richCops = User.findAll({ money = ORM.op(">", 1000), job = "police" })
 T.eq(#richCops, 2, "findAll operators: returns results")
 T.match(dbLog[1].sql, "`money` > %?", "findAll operators: has > operator in SQL")
 T.match(dbLog[1].sql, "`job` = %?", "findAll operators: has equality in SQL")

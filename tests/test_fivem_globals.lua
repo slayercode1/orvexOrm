@@ -225,7 +225,7 @@ local InlineUser = OrvexORM.model("inline_users", {
         beforeCreate = function(data) hookFired = true end,
     },
     scopes = {
-        active = function(b) b:where({ name = { "!=", "deleted" } }) end,
+        active = function(b) b:where({ name = OrvexORM.op("!=", "deleted") }) end,
     },
 })
 

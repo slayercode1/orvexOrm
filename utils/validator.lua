@@ -16,15 +16,37 @@ local TYPE_MAP = {
     timestamp = "string",
 }
 
+--- Every supported field type, in documentation order: the types of
+--- TYPE_MAP plus 'auto', the explicit "any value" type.
+---@type OrvexFieldType[]
+Validator.SUPPORTED_TYPES = { "string", "number", "boolean", "json", "auto", "date", "datetime", "timestamp" }
+
+---@type table<string, true>
+local KNOWN_TYPES = {}
+for _, fieldType in ipairs(Validator.SUPPORTED_TYPES) do
+    KNOWN_TYPES[fieldType] = true
+end
+
+---@param fieldType any
+---@return boolean
+function Validator.isKnownType(fieldType)
+    return KNOWN_TYPES[fieldType] == true
+end
+
+--- Fails closed: an unknown type (a typo such as 'int') is an error, not a
+--- disabled check. Schema.new refuses such types up front.
 ---@param field string
 ---@param value any
 ---@param fieldType OrvexFieldType
 ---@return boolean ok
 ---@return string|nil error
 function Validator.checkType(field, value, fieldType)
-    if value == nil then return true end
+    if fieldType == "auto" then return true end
     local expected = TYPE_MAP[fieldType]
-    if not expected then return true end
+    if not expected then
+        return false, ("Field '%s': unknown type '%s'"):format(field, tostring(fieldType))
+    end
+    if value == nil then return true end
     if type(value) ~= expected then
         return false, ("Field '%s': expected %s, got %s"):format(field, expected, type(value))
     end

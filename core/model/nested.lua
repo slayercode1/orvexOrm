@@ -7,6 +7,7 @@ local Helpers     = OrvexHelpers or require("utils.helpers")
 local Relations   = OrvexRelations or require("core.relations")
 local Logger      = OrvexLogger or require("utils.logger")
 local Transaction = OrvexTransaction or require("core.transaction")
+local Write       = OrvexModelWrite or require("core.model.write")
 
 local ensure = Helpers.ensure
 
@@ -25,27 +26,11 @@ local function nestedRows(rel, relData)
     return relData
 end
 
---- Queues multi-row inserts. insertMany takes its column list from the
---- first row, so rows are grouped by key set to never drop a column.
 ---@param tx OrvexTransaction
 ---@param targetTable string
 ---@param rows table[] encoded rows
 local function queueInserts(tx, targetTable, rows)
-    local groups, order = {}, {}
-    for _, row in ipairs(rows) do
-        local signature = table.concat(Helpers.sortedKeys(row), ",")
-        if not groups[signature] then
-            groups[signature] = {}
-            order[#order + 1] = signature
-        end
-        local group = groups[signature]
-        group[#group + 1] = row
-    end
-    for _, signature in ipairs(order) do
-        local q = Query.insertMany(targetTable, groups[signature])
-        Logger.query(q.sql, q.params)
-        tx:addRaw(q.sql, q.params)
-    end
+    Write.queueInsertGroups(tx, targetTable, Query.groupByKeySet(rows))
 end
 
 ---@param entry { model: OrvexModel, key: any }
@@ -119,7 +104,11 @@ function Nested.install(M, ctx)
         for relName, relData in pairs(nestedData) do
             local rel = relations[relName]
             if rel.type ~= Relations.BELONGS_TO then
-                rel.model._prepareInsertRows(nestedRows(rel, relData))
+                local rows = nestedRows(rel, relData)
+                for _, row in ipairs(rows) do
+                    Write.refuseManagedColumns(row, rel.model._schema, "createWith")
+                end
+                rel.model._prepareInsertRows(rows)
             end
         end
     end
@@ -211,6 +200,7 @@ function Nested.install(M, ctx)
     ---@return OrvexInstance
     function M.createWith(data)
         local mainData, nestedData = splitNestedData(data)
+        Write.refuseManagedColumns(mainData, ctx.schema, "createWith")
         validateNested(nestedData)
 
         local instance = M.create(mainData)

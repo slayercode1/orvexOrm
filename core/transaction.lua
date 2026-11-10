@@ -1,7 +1,7 @@
 -- core/transaction.lua
 -- Collects multiple queries and executes them atomically via MySQL.transaction.
 -- When given a cache, it records the tables its queries write and
--- invalidates them once the commit succeeds.
+-- invalidates them once the commit succeeds (or partially commits).
 
 local Query = OrvexQuery or require("core.query")
 
@@ -19,7 +19,7 @@ local Transaction = {}
 Transaction.__index = Transaction
 
 ---@param adapter OrvexAdapter
----@param cache? OrvexCache invalidated after a successful commit
+---@param cache? OrvexCache invalidated after a successful (or partial) commit
 ---@return OrvexTransaction
 function Transaction.new(adapter, cache)
     local self = setmetatable({}, Transaction)
@@ -123,14 +123,17 @@ function Transaction:getQueries()
     return self._queries
 end
 
---- A failed commit changed nothing, so the cache is only invalidated on success.
+--- An atomic commit that failed changed nothing, so the cache is kept. The
+--- adapter's non-atomic fallback may fail after committing some queries:
+--- every table the transaction touches is then invalidated, so no stale
+--- row can be served.
 ---@return boolean success
 function Transaction:commit()
     if #self._queries == 0 then
         return true
     end
-    local success = self._adapter:transaction(self._queries)
-    if success then invalidateTouched(self) end
+    local success, partiallyCommitted = self._adapter:transaction(self._queries)
+    if success or partiallyCommitted then invalidateTouched(self) end
     return success
 end
 

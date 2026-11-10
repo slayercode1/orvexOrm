@@ -96,11 +96,22 @@ end
 
 local _safeIdentifiers = {}
 
+--- Dot-separated segments of word characters, none of them empty: 'a..b',
+--- '.', '.a' or 'a.' would quote to empty `` parts.
+---@param name any
+---@return boolean
+local function isSafeIdentifier(name)
+    if type(name) ~= "string" or name == "" then return false end
+    for segment in (name .. "."):gmatch("(.-)%.") do
+        if not string_match(segment, "^[%w_]+$") then return false end
+    end
+    return true
+end
+
 ---@param name string
 function Helpers.assertSafeIdentifier(name)
     if _safeIdentifiers[name] then return end
-    assert(type(name) == "string" and string_match(name, "^[%w_.]+$"),
-        ("Invalid SQL identifier: '%s'"):format(tostring(name)))
+    assert(isSafeIdentifier(name), ("Invalid SQL identifier: '%s'"):format(tostring(name)))
     _safeIdentifiers[name] = true
 end
 
@@ -117,6 +128,87 @@ Helpers.VALID_OPERATORS = {
 function Helpers.assertValidOperator(op)
     assert(Helpers.VALID_OPERATORS[string_upper(op)],
         ("Invalid SQL operator: '%s'"):format(tostring(op)))
+end
+
+-- ─── Operator markers ──────────────────────────────────────────────
+-- A where value is an operator condition only when it was built by
+-- `Helpers.op` (exposed as ORM.op / Builder.op). Data decoded from a client
+-- (msgpack, JSON) can be shaped like `{ "LIKE", "%" }` but can never carry
+-- this metatable, so it cannot turn an equality into another operator.
+
+-- OrvexOpMarker is declared in lib/types/orvexorm.d.lua.
+
+local OP_MARKER = {
+    __metatable = "OrvexORM.op",
+    __tostring = function(marker)
+        return ("ORM.op(%s, %s)"):format(marker.operator, tostring(marker.value))
+    end,
+}
+
+--- Every marker `Helpers.op` built: the only tables read as operators.
+---@type table<OrvexOpMarker, true>
+local opMarkers = setmetatable({}, { __mode = "k" })
+
+---@param operator OrvexWhereOperator
+---@param value any
+---@return OrvexOpMarker
+function Helpers.op(operator, value)
+    Helpers.ensure(type(operator) == "string" and Helpers.VALID_OPERATORS[string_upper(operator)],
+        ("Invalid SQL operator: '%s'"):format(tostring(operator)))
+    Helpers.ensure(value ~= nil,
+        "ORM.op(): value is nil, use whereNull() / whereNotNull() or ORM.op('IS', 'NULL')")
+    local marker = setmetatable({ operator = string_upper(operator), value = value }, OP_MARKER)
+    opMarkers[marker] = true
+    return marker
+end
+
+---@param value any
+---@return boolean
+function Helpers.isOp(value)
+    return opMarkers[value] == true
+end
+
+-- ─── Numbers ───────────────────────────────────────────────────────
+
+--- A number that is neither NaN nor an infinity: the only numbers MySQL
+--- can store and that can be spliced into SQL as a literal.
+---@param value any
+---@return boolean
+function Helpers.isFiniteNumber(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+end
+
+-- ─── Bound values ──────────────────────────────────────────────────
+
+--- What a bound where value must be: anything else (a table a client sent,
+--- a function...) would be formatted by the driver, not compared as data.
+---@param value any
+---@return boolean ok
+---@return string|nil problem
+local function checkBindable(value)
+    local kind = type(value)
+    if kind == "string" or kind == "boolean" then return true end
+    if kind == "number" then
+        if not Helpers.isFiniteNumber(value) then return false, "a finite number" end
+        return true
+    end
+    return false, "a string, number or boolean"
+end
+
+--- A string, boolean or finite number: a value the driver binds as data.
+---@param value any
+---@return boolean
+function Helpers.isBindable(value)
+    return (checkBindable(value))
+end
+
+--- Raises unless `value` can be bound as a where parameter.
+---@param value any
+---@param label string what the value is, e.g. "where('identifier')"
+function Helpers.ensureBindable(value, label)
+    local ok, expected = checkBindable(value)
+    if ok then return end
+    Helpers.raise(("%s: the value must be %s, got %s"):format(label, expected, type(value)))
 end
 
 -- ─── Identifier quoting ────────────────────────────────────────────
@@ -223,6 +315,27 @@ end
 function Helpers.quoteLiteral(value)
     local escaped = tostring(value):gsub("\\", "\\\\"):gsub("'", "''")
     return "'" .. escaped .. "'"
+end
+
+-- ─── Statement verbs ───────────────────────────────────────────────
+
+--- Statements that return rows. WITH (common table expressions) is routed
+--- as a read; core/query.lua still checks it for a write verb.
+local READ_VERBS = { SELECT = true, SHOW = true, DESCRIBE = true, DESC = true, EXPLAIN = true, WITH = true }
+
+--- First keyword of a statement, upper-cased, skipping the parentheses that
+--- open `(SELECT ...) UNION (SELECT ...)`.
+---@param sql string
+---@return string|nil verb
+function Helpers.sqlVerb(sql)
+    local verb = string_match(sql, "^[%s(]*(%a+)")
+    return verb and string_upper(verb) or nil
+end
+
+---@param verb string|nil as returned by `Helpers.sqlVerb`
+---@return boolean
+function Helpers.isReadVerb(verb)
+    return READ_VERBS[verb] == true
 end
 
 -- ─── Placeholder cache ─────────────────────────────────────────────

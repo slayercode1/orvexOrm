@@ -90,6 +90,21 @@ local function whereOf(self)
     return states[self].where
 end
 
+--- The key a write or reload targets. Without it the statement would have
+--- no WHERE (or match another row), so the call is refused; its value is
+--- checked as a scalar by core/query.lua.
+---@param self OrvexInstance
+---@param method string
+---@return table<string, any>
+local function identityOf(self, method)
+    local where = whereOf(self)
+    local primaryKey = self._primaryKey
+    ensure(where[primaryKey] ~= nil,
+        ("%s(): the instance has no '%s' value to identify its row (select the primary key)")
+            :format(method, primaryKey))
+    return where
+end
+
 --- Keeps the row identity in sync when an update changes its key, so the
 --- next write still targets the same row.
 ---@param self OrvexInstance
@@ -112,18 +127,19 @@ end
 ---@param data table<string, any>
 ---@return integer affected rows the driver reports changed (0: none)
 function Instance:update(data)
+    Write.refuseManagedColumns(data, self._schema, "update")
     data = Helpers.shallowCopy(data)
     Hooks.fire(self._hooks, "beforeUpdate", self, data)
 
     Write.validate(data, self._schema.allFields)
 
     if self._timestamps then
-        data.updated_at = Helpers.nowUtc()
+        data.updated_at = data.updated_at or Helpers.nowUtc()
     end
 
     local encoded = Serializer.encodeRow(data, self._schema.encodeSet)
 
-    local affected = exec(self, Query.update(self._tableName, encoded, whereOf(self)))
+    local affected = exec(self, Query.update(self._tableName, encoded, identityOf(self, "update")))
 
     assignColumns(self, data)
     syncWhere(self, data)
@@ -137,13 +153,14 @@ end
 function Instance:delete()
     Hooks.fire(self._hooks, "beforeDelete", self)
 
+    local where = identityOf(self, "delete")
     local affected
     if self._softDelete then
         local now = Helpers.nowUtc()
-        affected = exec(self, Query.update(self._tableName, { deleted_at = now }, whereOf(self)))
+        affected = exec(self, Query.update(self._tableName, { deleted_at = now }, where))
         self.deleted_at = now
     else
-        affected = exec(self, Query.delete(self._tableName, whereOf(self)))
+        affected = exec(self, Query.delete(self._tableName, where))
     end
 
     Hooks.fire(self._hooks, "afterDelete", self)
@@ -154,7 +171,7 @@ end
 ---@return integer affected
 function Instance:forceDelete()
     Hooks.fire(self._hooks, "beforeDelete", self)
-    local affected = exec(self, Query.delete(self._tableName, whereOf(self)))
+    local affected = exec(self, Query.delete(self._tableName, identityOf(self, "forceDelete")))
     Hooks.fire(self._hooks, "afterDelete", self)
     return affected
 end
@@ -162,7 +179,7 @@ end
 ---@return integer affected
 function Instance:restore()
     ensure(self._softDelete, "restore() requires soft delete to be enabled")
-    local affected = exec(self, Query.restore(self._tableName, whereOf(self)))
+    local affected = exec(self, Query.restore(self._tableName, identityOf(self, "restore")))
     self.deleted_at = nil
     return affected
 end
@@ -173,7 +190,8 @@ end
 ---@param op string
 ---@return integer affected
 local function adjustColumn(self, column, amount, op)
-    local q = (op == "+" and Query.increment or Query.decrement)(self._tableName, column, amount, whereOf(self))
+    local method = Query.adjustMethod(op)
+    local q = Query[method](self._tableName, column, amount, identityOf(self, method))
     local affected = exec(self, q)
     local current = self:getAttribute(column)
     if current then
@@ -314,7 +332,7 @@ function InstanceLib.decodeRow(row, schema)
         local df = decodeFields[i]
         local val = row[df.name]
         if val ~= nil then
-            row[df.name] = Serializer.decode(val, df.type)
+            row[df.name] = Serializer.decode(val, df.type, df.name)
         end
     end
 end
@@ -322,7 +340,7 @@ end
 --- Reloads this instance's columns from the database.
 ---@return boolean found
 function Instance:refresh()
-    local q = Query.select(self._tableName, whereOf(self), "*")
+    local q = Query.select(self._tableName, identityOf(self, "refresh"), "*")
     Logger.query(q.sql, q.params)
     local rows = self._adapter:execute(q.sql, q.params)
     local row = rows and rows[1]

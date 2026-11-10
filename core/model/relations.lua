@@ -130,7 +130,11 @@ function ModelRelations.installDefinitions(M, ctx, deferred)
 
     function M.belongsToMany(name, relatedModel, ropts)
         ropts = ropts or {}
-        ensure(ropts.pivot, "belongsToMany requires a pivot table name")
+        for _, option in ipairs({ "pivot", "foreignKey", "otherKey" }) do
+            ensure(type(ropts[option]) == "string",
+                ("belongsToMany('%s') requires opts.%s"):format(tostring(name), option))
+            Helpers.assertSafeIdentifier(ropts[option])
+        end
         relations[name] = {
             type       = Relations.BELONGS_TO_MANY,
             model      = relatedModel,

@@ -149,7 +149,7 @@ assertEq(#db.log, 1, "eager include with nil foreign key runs no extra query")
 print("\n== #6 / #23 Model.find ==")
 
 db:reset()
-User.find({ id = { ">", 5 } })
+User.find({ id = ORM.op(">", 5) })
 assertContains(db.log[1].sql, "`id` > ?", "find with operator value emits the operator")
 assertEq(db.log[1].params[1], 5, "find with operator value binds the scalar")
 assertEq(type(db.log[1].params[1]), "number", "find never binds a Lua table")

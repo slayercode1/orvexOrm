@@ -330,13 +330,13 @@ assertEq(firstUser and firstUser.id, 1, "find() with no arguments returns the fi
 print("\n== Timestamp and soft delete columns are allowed ==")
 
 local stampedFields = { id = "number", name = "string" }
-local Stamped = ORM.model("conv_stamped", stampedFields, { adapter = db, timestamps = true, softDelete = true })
+local Stamped = ORM.model("conv_stamped", stampedFields, {
+    adapter = db, timestamps = true, softDelete = true, allowManagedColumns = true,
+})
 
 db:reset()
 local ok = pcall(Stamped.create, { name = "a", created_at = "2024-01-01 00:00:00", updated_at = "2024-01-01 00:00:00" })
-assertEq(ok, true, "create accepts undeclared created_at / updated_at when timestamps are on")
-ok = pcall(Stamped.update, { deleted_at = "2024-01-01 00:00:00" }, { id = 1 })
-assertEq(ok, true, "update accepts an undeclared deleted_at when soft delete is on")
+assertEq(ok, true, "create accepts undeclared created_at / updated_at with allowManagedColumns")
 
 Stamped.beforeCreate(function(data) data.created_at = "2020-01-01 00:00:00" end)
 ok = pcall(Stamped.create, { name = "b" })
@@ -433,6 +433,11 @@ assertEq(tables("UPDATE users, posts SET users.a = 1"), "nil", "a comma-joined U
 assertEq(tables("DELETE u FROM users u JOIN posts p ON 1"), "nil", "a multi-table DELETE is unknown")
 assertEq(tables("UPDATE users SET a = 1; DROP TABLE x"), "nil", "several statements are unknown")
 assertEq(tables("ALTER TABLE users ADD c INT"), "nil", "DDL is unknown")
+assertEq(tables("WITH t AS (SELECT 1) SELECT * FROM t"), "", "a WITH read writes nothing")
+assertEq(tables("(SELECT a FROM users) UNION (SELECT a FROM posts)"), "", "a parenthesised SELECT writes nothing")
+assertEq(tables("DESC users"), "", "DESC writes nothing")
+assertEq(tables("WITH t AS (SELECT id FROM x) UPDATE users SET a = 1"), "nil", "a WITH ... UPDATE is unknown")
+assertEq(tables("WITH t AS (SELECT id FROM x) DELETE FROM users"), "nil", "a WITH ... DELETE is unknown")
 
 -- ─── #42: the version comes from fxmanifest.lua ────────────────────
 

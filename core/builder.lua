@@ -5,6 +5,8 @@ local CacheLib  = OrvexCache or require("utils.cache")
 
 local assertId = Helpers.assertSafeIdentifier
 local assertOp = Helpers.assertValidOperator
+local ensure   = Helpers.ensure
+local ensureBindable = Helpers.ensureBindable
 local quoteId  = Helpers.quoteId
 local quoteColumnList = Helpers.quoteColumnList
 
@@ -14,9 +16,7 @@ local UNBOUNDED_LIMIT = "18446744073709551615"
 
 ---@alias OrvexWhereOperator "="|"!="|">"|"<"|">="|"<="|"LIKE"|"NOT LIKE"|"IN"|"NOT IN"|"BETWEEN"|"IS"|"IS NOT"
 
----@class OrvexWhereValue
----@field [1] OrvexWhereOperator
----@field [2] any
+---@alias OrvexWhereValue string|number|boolean|OrvexOpMarker
 
 ---@class OrvexWhereEntry
 ---@field clause string
@@ -41,6 +41,10 @@ local UNBOUNDED_LIMIT = "18446744073709551615"
 ---@field private _cache? OrvexCache
 local Builder = {}
 Builder.__index = Builder
+
+--- Operator condition for table-form where: `{ money = Builder.op(">", 100) }`
+--- (also ORM.op). A plain table value is never read as an operator.
+Builder.op = Helpers.op
 
 ---@param tableName string
 ---@param adapter OrvexAdapter
@@ -117,6 +121,23 @@ end
 
 -- ─── Internal: parse a single where condition ─────────────────────
 
+--- Copy of an IN / BETWEEN array whose elements are all bindable. `#`
+--- must match the ipairs count: a nil hole would leave more placeholders
+--- than bound values and shift every later parameter.
+---@param field string
+---@param op string
+---@param values any[]
+---@return any[]
+local function bindableList(field, op, values)
+    local list = {}
+    for i, element in ipairs(values) do
+        ensureBindable(element, ("%s('%s') element %d"):format(op, field, i))
+        list[i] = element
+    end
+    ensure(#list == #values, ("%s('%s'): the array has a nil hole"):format(op, field))
+    return list
+end
+
 ---@param field string
 ---@param operator string
 ---@param value any
@@ -131,27 +152,33 @@ local function buildCondition(field, operator, value)
 
     if op == "IN" or op == "NOT IN" then
         assert(type(value) == "table" and #value > 0, op .. " requires a non-empty array")
-        return column .. " " .. op .. " (" .. Helpers.placeholders(#value) .. ")", value
+        local list = bindableList(field, op, value)
+        return column .. " " .. op .. " (" .. Helpers.placeholders(#list) .. ")", list
     elseif op == "BETWEEN" then
         assert(type(value) == "table" and #value == 2, "BETWEEN requires a table with 2 values")
-        return column .. " BETWEEN ? AND ?", { value[1], value[2] }
+        return column .. " BETWEEN ? AND ?", bindableList(field, op, value)
     elseif op == "IS" or op == "IS NOT" then
         assert(value == "NULL", "IS/IS NOT only supports NULL (use whereNull / whereNotNull)")
         return column .. " " .. op .. " NULL", {}
     end
+    ensureBindable(value, ("where('%s', '%s')"):format(field, op))
     return column .. " " .. op .. " ?", { value }
 end
 
---- Table-form entry: `{ field = value }` or `{ field = { operator, value } }`.
----@param k string
----@param v any
+--- Equality on `field`, or the condition of an ORM.op marker. Any other
+--- table is refused: it is usually data a client shaped as `{ op, value }`.
+---@param field string
+---@param value any
 ---@return string clause
 ---@return any[] params
-local function parseWhereEntry(k, v)
-    if type(v) == "table" then
-        return buildCondition(k, v[1], v[2])
+local function equalityOrMarker(field, value)
+    if Helpers.isOp(value) then
+        return buildCondition(field, value.operator, value.value)
     end
-    return buildCondition(k, "=", v)
+    ensure(type(value) ~= "table",
+        ("where('%s'): a plain table is not a value; build operator conditions with ORM.op(operator, value)")
+            :format(field))
+    return buildCondition(field, "=", value)
 end
 
 ---@param self OrvexBuilder
@@ -184,22 +211,23 @@ local function addWhere(self, method, orFlag, field, ...)
 
     if type(field) == "table" then
         for _, k in ipairs(Helpers.sortedKeys(field)) do
-            pushWhere(self, orFlag, parseWhereEntry(k, field[k]))
+            pushWhere(self, orFlag, equalityOrMarker(k, field[k]))
         end
         return self
     end
 
     assert(type(field) == "string" and argc >= 1, ("Invalid %s() arguments"):format(method))
 
-    local operator, value
     if argc == 1 then
-        operator, value = "=", ...
-    else
-        operator, value = ...
+        local value = ...
+        assert(value ~= nil, ("%s('%s'): value is nil, use whereNull() / whereNotNull() for NULL checks")
+            :format(method, field))
+        return pushWhere(self, orFlag, equalityOrMarker(field, value))
     end
+
+    local operator, value = ...
     assert(value ~= nil, ("%s('%s'): value is nil, use whereNull() / whereNotNull() for NULL checks")
         :format(method, field))
-
     return pushWhere(self, orFlag, buildCondition(field, operator, value))
 end
 
@@ -218,7 +246,7 @@ function Builder:distinct()
     return self
 end
 
----@param field string|table<string, any|OrvexWhereValue>
+---@param field string|table<string, OrvexWhereValue>
 ---@param operator? OrvexWhereOperator|any
 ---@param value? any
 ---@return OrvexBuilder
@@ -226,7 +254,7 @@ function Builder:where(field, ...)
     return addWhere(self, "where", false, field, ...)
 end
 
----@param field string|table<string, any|OrvexWhereValue>
+---@param field string|table<string, OrvexWhereValue>
 ---@param operator? OrvexWhereOperator|any
 ---@param value? any
 ---@return OrvexBuilder
@@ -248,9 +276,14 @@ function Builder:constrain(apply)
     return self
 end
 
+--- Operators that compare two columns; IN, BETWEEN or IS would build
+--- malformed SQL.
+local COLUMN_OPERATORS = { ["="] = true, ["!="] = true, ["<>"] = true,
+    [">"] = true, ["<"] = true, [">="] = true, ["<="] = true }
+
 --- Compares two columns: `whereColumn(a, b)` or `whereColumn(a, op, b)`.
 ---@param first string
----@param operator string
+---@param operator "="|"!="|"<>"|">"|"<"|">="|"<="|string
 ---@param second? string
 ---@return OrvexBuilder
 function Builder:whereColumn(first, operator, second)
@@ -259,8 +292,9 @@ function Builder:whereColumn(first, operator, second)
     end
     assertId(first)
     assertId(second)
-    assertOp(operator)
-    return andWhere(self, quoteId(first) .. " " .. operator:upper() .. " " .. quoteId(second), {})
+    ensure(COLUMN_OPERATORS[operator],
+        ("whereColumn(): '%s' is not a comparison operator (=, !=, <>, >, <, >=, <=)"):format(tostring(operator)))
+    return andWhere(self, quoteId(first) .. " " .. operator .. " " .. quoteId(second), {})
 end
 
 --- Escape hatch for conditions the builder cannot express.
@@ -340,6 +374,8 @@ end
 ---@param operator "BETWEEN"|"NOT BETWEEN"
 local function addBetween(self, operator, column, min, max)
     assertId(column)
+    ensureBindable(min, ("%s('%s') min"):format(operator, column))
+    ensureBindable(max, ("%s('%s') max"):format(operator, column))
     return andWhere(self, quoteId(column) .. " " .. operator .. " ? AND ?", { min, max })
 end
 
@@ -626,7 +662,20 @@ end
 ---@return any[] params
 function Builder:_buildSQL(selectExpr)
     local body, params = self:_buildBody()
-    return self:_selectClause(selectExpr or self._selects) .. body .. self:_buildPaging(), params
+    return self:_selectClause(selectExpr or self:_defaultSelect()) .. body .. self:_buildPaging(), params
+end
+
+--- A model query wraps every row as an instance of its own table, keyed by
+--- the row's primary key. With joins, `*` would let a joined table's
+--- same-named column (`id`...) overwrite it, and the instance's writes
+--- would hit another row: the default select becomes `table`.*.
+---@private
+---@return string
+function Builder:_defaultSelect()
+    if self._selects == "*" and self._wrapFn and #self._joins > 0 then
+        return self._table .. ".*"
+    end
+    return self._selects
 end
 
 --- Select list of the derived table a count wraps. A `*` select would
@@ -789,8 +838,19 @@ function Builder:_scanner()
     return scanner
 end
 
+--- A limit set on the builder bounds the whole scan: `remaining` rows are
+--- still to read (nil: no limit).
+---@param size integer
+---@param remaining? integer
+---@return integer
+local function pageSize(size, remaining)
+    if remaining and remaining < size then return remaining end
+    return size
+end
+
 --- OFFSET-based chunking. Prefer chunkById on large tables: each chunk
---- makes MySQL skip every previous row.
+--- makes MySQL skip every previous row. A limit set on the builder caps
+--- the total number of rows scanned.
 ---@param size integer
 ---@param callback fun(rows: OrvexInstance[], chunkIndex: integer): boolean?
 function Builder:chunk(size, callback)
@@ -798,9 +858,11 @@ function Builder:chunk(size, callback)
     local scanner = self:_scanner()
     local chunkIndex = 0
     local currentOffset = self._offset or 0
+    local remaining = self._limit
 
-    while true do
-        scanner._limit = size
+    while remaining ~= 0 do
+        local limit = pageSize(size, remaining)
+        scanner._limit = limit
         scanner._offset = currentOffset
         local results = scanner:get()
 
@@ -809,41 +871,47 @@ function Builder:chunk(size, callback)
         chunkIndex = chunkIndex + 1
         local shouldContinue = callback(results, chunkIndex)
         if shouldContinue == false then break end
-        if #results < size then break end
+        if #results < limit then break end
 
-        currentOffset = currentOffset + size
+        currentOffset = currentOffset + limit
+        if remaining then remaining = remaining - limit end
     end
 end
 
 --- Keyset chunking: `WHERE column > lastKey ORDER BY column LIMIT size`.
 --- Constant cost per chunk whatever the table size. `column` must be unique
---- and present in the selected columns.
+--- and present in the selected columns. A limit set on the builder caps
+--- the total number of rows scanned; an offset is refused (keyset pages
+--- do not skip rows).
 ---@param size integer
 ---@param callback fun(rows: OrvexInstance[], chunkIndex: integer): boolean?
 ---@param column? string defaults to "id"
 function Builder:chunkById(size, callback, column)
     size = toPositiveInteger(size, "chunkById size")
+    ensure(self._offset == nil, "chunkById() cannot be combined with offset(): use where(column, '>', key) instead")
     column = column or "id"
     assertId(column)
     local key = unqualified(column)
     local lastKey = nil
     local chunkIndex = 0
+    local remaining = self._limit
 
-    while true do
+    while remaining ~= 0 do
         local page = self:_scanner()
         if lastKey ~= nil then
             page:constrain(function(q) q:where(column, ">", lastKey) end)
         end
         setOrder(page, column, "ASC")
-        page._limit = size
-        page._offset = nil
+        local limit = pageSize(size, remaining)
+        page._limit = limit
         local results = page:get()
 
         if #results == 0 then break end
 
         chunkIndex = chunkIndex + 1
         if callback(results, chunkIndex) == false then break end
-        if #results < size then break end
+        if #results < limit then break end
+        if remaining then remaining = remaining - limit end
 
         lastKey = results[#results][key]
         assert(lastKey ~= nil, ("chunkById: column '%s' is missing from the results"):format(key))
@@ -856,6 +924,9 @@ end
 function Builder:paginate(page, perPage)
     page = toPositiveInteger(page or 1, "Page")
     perPage = toPositiveInteger(perPage or 15, "perPage")
+    -- Lua integers wrap: a huge page would give a negative (or zero) OFFSET.
+    ensure(page - 1 <= math.maxinteger // perPage,
+        ("paginate(): page %d is too large for perPage %d"):format(page, perPage))
 
     local total = self:count()
 

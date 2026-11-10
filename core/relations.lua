@@ -60,7 +60,16 @@ end
 
 -- ─── Fetchers ──────────────────────────────────────────────────────
 -- A nil key matches nothing: querying with it would drop the condition
--- and return unrelated rows, so the fetchers short-circuit instead.
+-- and return unrelated rows, so the fetchers short-circuit instead. Any
+-- other key must be a scalar: a table (an ORM.op marker or data a consumer
+-- copied onto the instance) would change the lookup's condition.
+
+---@param key any
+---@param rel OrvexRelationDef
+---@param column string
+local function ensureKey(key, rel, column)
+    Helpers.ensureBindable(key, ("%s relation key '%s'"):format(rel.type, column))
+end
 
 ---@param instance OrvexInstance
 ---@param rel OrvexRelationDef
@@ -68,6 +77,7 @@ end
 function Relations.fetchHasOne(instance, rel)
     local key = instance[rel.localKey]
     if key == nil then return nil end
+    ensureKey(key, rel, rel.localKey)
     return rel.model.find({ [rel.foreignKey] = key })
 end
 
@@ -77,6 +87,7 @@ end
 function Relations.fetchHasMany(instance, rel)
     local key = instance[rel.localKey]
     if key == nil then return {} end
+    ensureKey(key, rel, rel.localKey)
     return rel.model.findAll({ [rel.foreignKey] = key })
 end
 
@@ -86,6 +97,7 @@ end
 function Relations.fetchBelongsTo(instance, rel)
     local key = instance[rel.foreignKey]
     if key == nil then return nil end
+    ensureKey(key, rel, rel.foreignKey)
     return rel.model.find({ [rel.ownerKey] = key })
 end
 
@@ -95,6 +107,7 @@ end
 function Relations.fetchBelongsToMany(instance, rel)
     local key = instance[rel.localKey]
     if key == nil then return {} end
+    ensureKey(key, rel, rel.localKey)
 
     local rows = Relations.relatedQuery(rel):where(Relations.lookupColumn(rel), key):get()
     local results = {}
@@ -120,6 +133,8 @@ local function pivotKeys(instance, rel, relatedInstance, method)
         ("%s(): the parent has no '%s' value"):format(method, tostring(rel.localKey)))
     Helpers.ensure(relatedKey ~= nil,
         ("%s(): the related row has no '%s' value"):format(method, rel.model._primaryKey))
+    Helpers.ensureBindable(parentKey, ("%s(): parent key '%s'"):format(method, tostring(rel.localKey)))
+    Helpers.ensureBindable(relatedKey, ("%s(): related key '%s'"):format(method, rel.model._primaryKey))
     return {
         [rel.foreignKey] = parentKey,
         [rel.otherKey]   = relatedKey,

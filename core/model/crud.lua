@@ -17,6 +17,7 @@ local MigrationLib = OrvexMigration or require("core.migration")
 local Logger       = OrvexLogger or require("utils.logger")
 local Hooks        = OrvexModelHooks or require("core.model.hooks")
 local Write        = OrvexModelWrite or require("core.model.write")
+local Transaction  = OrvexTransaction or require("core.transaction")
 
 local ensure  = Helpers.ensure
 local raise   = Helpers.raise
@@ -59,6 +60,8 @@ local function buildColumns(selectOpt, pk)
     return table.concat(cols, ", ")
 end
 
+--- Table values (ORM.op markers) need the query builder, which also
+--- refuses plain tables: they are never read as `{ operator, value }`.
 ---@param where table<string, any>
 ---@return boolean
 local function hasOperatorValues(where)
@@ -66,6 +69,19 @@ local function hasOperatorValues(where)
         if type(v) == "table" then return true end
     end
     return false
+end
+
+--- findOrCreate / updateOrCreate insert the where as data when nothing
+--- matches, so it must hold plain equality values.
+---@param where any
+---@param method string
+local function requireEqualities(where, method)
+    ensure(type(where) == "table", method .. "() requires a where table")
+    for k, v in pairs(where) do
+        ensure(not Helpers.isOp(v),
+            ("%s(): where '%s' must be a plain value, not ORM.op (the where is also the created row)")
+                :format(method, tostring(k)))
+    end
 end
 
 --- Class-level writes refuse an empty where: it would hit every row.
@@ -134,6 +150,7 @@ local function installCreate(M, ctx, execWrite)
     ---@param data table<string, any>
     ---@return OrvexInstance
     function M.create(data)
+        Write.refuseManagedColumns(data, schema, "create")
         data = Helpers.shallowCopy(data)
         Hooks.fire(hooks, "beforeCreate", data)
 
@@ -171,14 +188,32 @@ local function installCreate(M, ctx, execWrite)
         Hooks.fire(hooks, "afterBulkCreate", rows)
     end
 
-    --- Inserts every row in one multi-row INSERT. Fires beforeCreate on a
-    --- copy of each row, then afterBulkCreate once (no instance is built).
+    --- Rows with different key sets need one INSERT each (an insertMany
+    --- takes its columns from its first row); they run in one transaction,
+    --- which invalidates the model's cache once it commits.
+    ---@param groups table[][] encoded rows grouped by key set
+    local function insertGroups(groups)
+        if #groups == 1 then
+            execWrite(Query.insertMany(tableName, groups[1]))
+            return
+        end
+        local tx = Transaction.new(ctx.adapter, ctx.cache)
+        Write.queueInsertGroups(tx, tableName, groups)
+        ensure(tx:commit(), ("createMany('%s'): the transaction failed"):format(tableName))
+    end
+
+    --- Inserts every row in one multi-row INSERT (one per key set, in a
+    --- transaction, when rows have different columns). Fires beforeCreate
+    --- on a copy of each row, then afterBulkCreate once (no instance is built).
     ---@param rows table[]
     ---@return boolean
     function M.createMany(rows)
         ensure(type(rows) == "table" and #rows > 0, "createMany requires at least one row")
+        for _, row in ipairs(rows) do
+            Write.refuseManagedColumns(row, schema, "createMany")
+        end
         local copies = M._beforeBulkCreate(rows)
-        execWrite(Query.insertMany(tableName, M._prepareInsertRows(copies)))
+        insertGroups(Query.groupByKeySet(M._prepareInsertRows(copies)))
         M._afterBulkCreate(copies)
         return true
     end
@@ -186,6 +221,7 @@ local function installCreate(M, ctx, execWrite)
     ---@param data table<string, any>
     ---@return boolean
     function M.upsert(data)
+        Write.refuseManagedColumns(data, schema, "upsert")
         data = Helpers.shallowCopy(data)
         Hooks.fire(hooks, "beforeUpsert", data)
         local row, encoded = prepareInsert(data)
@@ -212,6 +248,15 @@ end
 local function installUpdateDelete(M, ctx, execWrite)
     local tableName, schema, hooks = ctx.tableName, ctx.schema, ctx.hooks
 
+    --- Class writes on a soft delete model leave trashed rows alone. An
+    --- explicit `deleted_at` condition targets them on purpose, as in find.
+    ---@param where table<string, any>
+    ---@return string[]|nil nullColumns
+    local function liveRowsOnly(where)
+        if ctx.softDelete and where.deleted_at == nil then return { "deleted_at" } end
+        return nil
+    end
+
     --- Argument order: data first, as in `Instance:update(data)`.
     --- `updateWhere(where, data)` is the where-first alias; both are kept
     --- for backward compatibility.
@@ -220,6 +265,7 @@ local function installUpdateDelete(M, ctx, execWrite)
     ---@return integer affected rows the driver reports changed (0: none)
     function M.update(data, where)
         requireWhere(where, "update")
+        Write.refuseManagedColumns(data, schema, "update")
 
         data = Helpers.shallowCopy(data)
         Hooks.fire(hooks, "beforeBulkUpdate", data, where)
@@ -230,7 +276,7 @@ local function installUpdateDelete(M, ctx, execWrite)
         end
 
         local encoded = Serializer.encodeRow(data, schema.encodeSet)
-        local affected = execWrite(Query.update(tableName, encoded, where))
+        local affected = execWrite(Query.update(tableName, encoded, where, liveRowsOnly(where)))
         Hooks.fire(hooks, "afterBulkUpdate", data, where, affected)
         return affected
     end
@@ -251,7 +297,7 @@ local function installUpdateDelete(M, ctx, execWrite)
     function M.delete(where)
         requireWhere(where, "delete")
         if ctx.softDelete then
-            return bulkDelete(where, Query.update(tableName, { deleted_at = nowUtc() }, where))
+            return bulkDelete(where, Query.update(tableName, { deleted_at = nowUtc() }, where, liveRowsOnly(where)))
         end
         return bulkDelete(where, Query.delete(tableName, where))
     end
@@ -271,11 +317,11 @@ local function installUpdateDelete(M, ctx, execWrite)
         return execWrite(Query.restore(tableName, where))
     end
 
+    ---@param method "increment"|"decrement"
     ---@return integer affected
-    local function classAdjust(column, amount, where, op)
-        requireWhere(where, op)
-        local q = (op == "increment" and Query.increment or Query.decrement)(tableName, column, amount, where)
-        return execWrite(q)
+    local function classAdjust(column, amount, where, method)
+        requireWhere(where, method)
+        return execWrite(Query[method](tableName, column, amount, where, liveRowsOnly(where)))
     end
 
     --- The amount is required here, unlike `Instance:increment(column, amount?)`
@@ -436,6 +482,7 @@ local function installFind(M, ctx)
     ---@return OrvexInstance instance
     ---@return boolean created
     function M.findOrCreate(where, defaults)
+        requireEqualities(where, "findOrCreate")
         local existing = M.find(where)
         if existing then
             return existing, false
@@ -448,6 +495,7 @@ local function installFind(M, ctx)
     ---@return OrvexInstance instance
     ---@return boolean created
     function M.updateOrCreate(where, data)
+        requireEqualities(where, "updateOrCreate")
         local existing = M.find(where)
         if existing then
             existing:update(data)

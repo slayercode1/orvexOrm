@@ -54,24 +54,24 @@ T.match(sql, "HAVING COUNT", "builder HAVING clause")
 T.eq(params[1], 5, "builder HAVING param correct")
 
 b = BuilderLib.new("users", nil, nil)
-sql, params = b:where({ id = { "IN", { 1, 2, 3 } } }):toSQL()
+sql, params = b:where({ id = BuilderLib.op("IN", { 1, 2, 3 }) }):toSQL()
 T.match(sql, "`id` IN %(%?, %?, %?%)", "builder WHERE IN")
 
 b = BuilderLib.new("users", nil, nil)
-sql, params = b:where({ money = { "BETWEEN", { 100, 1000 } } }):toSQL()
+sql, params = b:where({ money = BuilderLib.op("BETWEEN", { 100, 1000 }) }):toSQL()
 T.match(sql, "`money` BETWEEN %? AND %?", "builder WHERE BETWEEN")
 
 b = BuilderLib.new("users", nil, nil)
-sql = b:where({ name = { "LIKE", "%john%" } }):toSQL()
+sql = b:where({ name = BuilderLib.op("LIKE", "%john%") }):toSQL()
 T.match(sql, "`name` LIKE %?", "builder WHERE LIKE")
 
 b = BuilderLib.new("users", nil, nil)
-sql, params = b:where({ deleted_at = { "IS", "NULL" } }):toSQL()
+sql, params = b:where({ deleted_at = BuilderLib.op("IS", "NULL") }):toSQL()
 T.match(sql, "`deleted_at` IS NULL", "builder WHERE IS NULL")
 T.eq(#params, 0, "builder IS NULL has no params")
 
 b = BuilderLib.new("users", nil, nil)
-sql = b:where({ status = { "!=", "banned" } }):toSQL()
+sql = b:where({ status = BuilderLib.op("!=", "banned") }):toSQL()
 T.match(sql, "`status` != %?", "builder WHERE !=")
 
 b = BuilderLib.new("users", nil, nil)
@@ -109,7 +109,7 @@ T.match(sql, "`id` NOT IN %(SELECT user_id FROM banned%)", "builder: whereNotIn 
 
 -- NOT IN operator in where
 b = BuilderLib.new("users", nil, nil)
-sql, params = b:where({ id = { "NOT IN", { 1, 2, 3 } } }):toSQL()
+sql, params = b:where({ id = BuilderLib.op("NOT IN", { 1, 2, 3 }) }):toSQL()
 T.match(sql, "`id` NOT IN %(", "builder: NOT IN operator")
 
 -- Cursor pagination: after

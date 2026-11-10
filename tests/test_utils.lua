@@ -108,4 +108,33 @@ do
     T.eq(nilResult, nil, "date decode: nil returns nil")
 end
 
+-- ─── Test: Shared helpers ──────────────────────────────────────────
+
+T.section("Helpers: numbers, bound values and statement verbs")
+
+local Helpers = require("utils.helpers")
+
+T.eq(Helpers.isFiniteNumber(3), true, "isFiniteNumber: integer")
+T.eq(Helpers.isFiniteNumber(-2.5), true, "isFiniteNumber: float")
+T.eq(Helpers.isFiniteNumber(0 / 0), false, "isFiniteNumber: NaN")
+T.eq(Helpers.isFiniteNumber(math.huge), false, "isFiniteNumber: infinity")
+T.eq(Helpers.isFiniteNumber("3"), false, "isFiniteNumber: numeric string")
+
+T.eq(Helpers.isBindable("a"), true, "isBindable: string")
+T.eq(Helpers.isBindable(false), true, "isBindable: boolean")
+T.eq(Helpers.isBindable(-math.huge), false, "isBindable: infinity")
+T.eq(Helpers.isBindable({}), false, "isBindable: table")
+
+T.eq(Helpers.sqlVerb("  select 1"), "SELECT", "sqlVerb: upper-cased first keyword")
+T.eq(Helpers.sqlVerb("(SELECT 1) UNION (SELECT 2)"), "SELECT", "sqlVerb: skips opening parentheses")
+T.eq(Helpers.sqlVerb(""), nil, "sqlVerb: nil for an empty statement")
+T.eq(Helpers.isReadVerb("WITH"), true, "isReadVerb: WITH is routed as a read")
+T.eq(Helpers.isReadVerb("UPDATE"), false, "isReadVerb: UPDATE is a write")
+
+T.eq(table.concat(Validator.SUPPORTED_TYPES, ", "), "string, number, boolean, json, auto, date, datetime, timestamp",
+    "Validator.SUPPORTED_TYPES lists every type in documentation order")
+for _, fieldType in ipairs(Validator.SUPPORTED_TYPES) do
+    T.eq(Validator.isKnownType(fieldType), true, "isKnownType: " .. fieldType)
+end
+
 T.finish()

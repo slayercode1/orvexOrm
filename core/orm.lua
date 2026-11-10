@@ -36,6 +36,13 @@ local defaultAdapter = Adapter.new(MySQLDriver.new())
 ---@type OrvexCache
 local globalCache = Cache.new({ ttl = 60, enabled = false })
 
+--- Operator condition for a table-form where:
+--- `User.findAll({ money = ORM.op(">", 1000) })`. Only values built here
+--- are read as operators; any other table value raises, so data shaped
+--- like `{ "LIKE", "%" }` (e.g. a client's net-event argument) can never
+--- turn an equality into another comparison.
+ORM.op = Helpers.op
+
 ---@param tableName string
 ---@param fields table<string, OrvexFieldType>
 ---@param opts? OrvexModelOpts
