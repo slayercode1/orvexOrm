@@ -19,18 +19,17 @@ local THREAD_REQUIRED = "OrvexORM: database calls yield and must run inside Citi
 local MYSQL_ASYNC_TRANSACTION_REQUIRED = "OrvexORM: atomic transactions need mysql-async >= 3.3 "
     .. "(MySQL.Async.transaction); upgrade mysql-async or switch to oxmysql"
 
----@param query string
----@return string|nil verb
-local function sqlVerb(query)
-    local verb = query:match("^%s*(%a+)")
-    return verb and verb:upper() or nil
-end
+local MYSQL_ASYNC_READ_FAILED = "OrvexORM: mysql-async returned no result for a read query "
+    .. "(the query most likely failed): %s"
+
+local Helpers = OrvexHelpers or require("utils.helpers")
+
+local sqlVerb = Helpers.sqlVerb
 
 ---@param query string
 ---@return boolean
 local function isReadQuery(query)
-    local verb = sqlVerb(query)
-    return verb == "SELECT" or verb == "DESCRIBE" or verb == "SHOW" or verb == "EXPLAIN"
+    return Helpers.isReadVerb(sqlVerb(query))
 end
 
 ---@param result any
@@ -164,6 +163,20 @@ local function toMysqlAsyncQueries(queries)
     return converted
 end
 
+--- mysql-async fetchAll gives {} for an empty result, so nil means the query
+--- failed. Raising keeps a transient failure from being cached as "no rows".
+---@param async table MySQL.Async-shaped API
+---@param query string
+---@param params any
+---@return table[] rows
+local function mysqlAsyncFetchAll(async, query, params)
+    local rows = awaitCallback(async.fetchAll, query, params)
+    if rows == nil then
+        error(MYSQL_ASYNC_READ_FAILED:format(query), 0)
+    end
+    return rows
+end
+
 -- ─── Driver ────────────────────────────────────────────────────────
 
 ---@class OrvexAutoDriver : OrvexDriver
@@ -204,7 +217,7 @@ function AutoDriver:_execute(query, params)
     elseif self._mode == "oxmysql_global" then
         return asTable(oxmysqlAwait(MySQL.query, query, params))
     elseif isReadQuery(query) then
-        return asTable(awaitCallback(self._async.fetchAll, query, params))
+        return asTable(mysqlAsyncFetchAll(self._async, query, params))
     else
         return asTable(awaitCallback(self._async.execute, query, params))
     end
@@ -232,7 +245,7 @@ function AutoDriver:_scalar(query, params)
     elseif verb == "INSERT" then
         return awaitCallback(self._async.insert, query, params)
     elseif isReadQuery(query) then
-        return awaitCallback(self._async.fetchAll, query, params)
+        return mysqlAsyncFetchAll(self._async, query, params)
     else
         return awaitCallback(self._async.execute, query, params)
     end

@@ -76,7 +76,10 @@ end
 
 --- mysql-async API keyed by export name; `self` is dropped so it also backs MySQL.Async.
 local api = {
-    mysql_fetch_all = function(query, params, cb) record("mysql_fetch_all", query, params); cb(results.fetch_all or {}) end,
+    mysql_fetch_all = function(query, params, cb)
+        record("mysql_fetch_all", query, params)
+        if results.fetch_all_nil then cb(nil) else cb(results.fetch_all or {}) end
+    end,
     mysql_execute = function(query, params, cb) record("mysql_execute", query, params); cb(results.execute or 0) end,
     mysql_insert = function(query, params, cb) record("mysql_insert", query, params); cb(results.insert) end,
     mysql_transaction = function(queries, params, cb)
@@ -131,6 +134,34 @@ local function runSuite(label)
     reset()
     newDriver():execute("UPDATE users SET a = 1", {})
     assert_eq(calls[1].fn, "mysql_execute", "execute UPDATE -> execute")
+
+    for _, sql in ipairs({
+        "DESC users", "describe users", "SHOW TABLES", "EXPLAIN SELECT 1",
+        "WITH t AS (SELECT 1 AS n) SELECT n FROM t", "(SELECT 1) UNION (SELECT 2)", "  ( select 1 )",
+    }) do
+        reset()
+        results.fetch_all = { { n = 1 } }
+        local readRows = newDriver():execute(sql, {})
+        assert_eq(calls[1].fn, "mysql_fetch_all", ("execute %q -> fetchAll"):format(sql))
+        assert_eq(#readRows, 1, ("execute %q returns rows"):format(sql))
+    end
+
+    reset()
+    results.fetch_all = {}
+    local empty = newDriver():execute("SELECT * FROM users WHERE id = ?", { 404 })
+    assert_eq(type(empty) == "table" and #empty, 0, "a genuine empty read stays an empty table")
+
+    reset()
+    results.fetch_all_nil = true
+    assert_error(function() newDriver():execute("SELECT * FROM bans WHERE id = ?", { 1 }) end,
+        "returned no result", "execute read with nil result -> error, not an empty table")
+    assert_error(function() newDriver():scalar("SELECT COUNT(*) AS n FROM bans", {}) end,
+        "returned no result", "scalar read with nil result -> error")
+
+    reset()
+    results.execute = nil
+    local writeRows = newDriver():execute("UPDATE users SET a = 1", {})
+    assert_eq(type(writeRows) == "table" and #writeRows, 0, "execute write keeps returning a table")
 
     reset()
     results.insert = 11

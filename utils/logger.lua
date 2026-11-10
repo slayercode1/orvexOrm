@@ -29,13 +29,29 @@ local function sanitize(value, key, seen)
     return clean
 end
 
+local SHORT_ESCAPES = { ['"'] = '\\"', ["\\"] = "\\\\", ["\n"] = "\\n", ["\r"] = "\\r", ["\t"] = "\\t" }
+
+---@param char string
+---@return string
+local function escapeChar(char)
+    return SHORT_ESCAPES[char] or ("\\u%04x"):format(char:byte())
+end
+
+--- JSON string escaping that is also safe to print on the FiveM console:
+--- every control character (ESC included) becomes \u00XX, and the caret of a
+--- ^0-^9 colour code becomes ^, so logged data cannot recolour or rewrite
+--- the console. Both are valid JSON escapes: decoding gives the original text.
+---@param value string
+---@return string
+local function escapeString(value)
+    local escaped = value:gsub('[%c"\\]', escapeChar):gsub("%^(%d)", "\\u005e%1")
+    return escaped
+end
+
 local function encode(value)
     if value == nil then return "null" end
     if type(value) == "boolean" or type(value) == "number" then return tostring(value) end
-    if type(value) == "string" then
-        local escaped = value:gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n"):gsub("\r", "\\r"):gsub("\t", "\\t")
-        return '"' .. escaped .. '"'
-    end
+    if type(value) == "string" then return '"' .. escapeString(value) .. '"' end
     if type(value) ~= "table" then return encode(tostring(value)) end
     local parts = {}
     for key, child in pairs(value) do parts[#parts + 1] = encode(tostring(key)) .. ":" .. encode(child) end
