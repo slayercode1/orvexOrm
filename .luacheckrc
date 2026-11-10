@@ -8,7 +8,8 @@
 std = "lua53"
 local lua54Additions = { "warn", coroutine = { fields = { "close" } } }
 max_line_length = 240
-exclude_files = { "docs/**", "release/**", ".claude/**" }
+-- .lua, .lua-build and .luarocks are created inside the workspace by the CI Lua setup actions.
+exclude_files = { "docs/**", "release/**", ".claude/**", ".lua/**", ".lua-build/**", ".luarocks/**" }
 
 -- Natives and runtime globals provided by FiveM / oxmysql / ox_lib.
 local fivemGlobals = {
