@@ -1,13 +1,21 @@
 {
     "runtime": {
-        "version": "Lua 5.3"
+        "version": "Lua 5.4"
     },
     "workspace": {
         "library": [],
-        "checkThirdParty": false
+        "checkThirdParty": false,
+        "ignoreDir": ["docs", "release"]
     },
     "diagnostics": {
-        "globals": ["MySQL", "Citizen", "promise", "json"],
+        "globals": [
+            "MySQL", "Citizen", "CreateThread", "Wait", "SetTimeout",
+            "exports", "promise", "json", "lib", "source",
+            "GetConvar", "GetConvarInt", "GetResourceMetadata", "GetResourcePath",
+            "GetCurrentResourceName", "LoadResourceFile", "SaveResourceFile",
+            "SetHttpHandler", "RegisterCommand", "IsPlayerAceAllowed",
+            "AddEventHandler", "RegisterNetEvent", "TriggerEvent", "GetGameTimer"
+        ],
         "disable": ["lowercase-global"]
     },
     "completion": {

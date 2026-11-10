@@ -1,0 +1,62 @@
+name: Test
+
+on:
+  push:
+    branches: ['**']
+    paths-ignore:
+      - 'docs/**'
+      - '.github/workflows/deploy-docs.yml'
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '.github/workflows/deploy-docs.yml'
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lua 5.4 tests and lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Lua
+        uses: leafo/gh-actions-lua@32909a2dea0a48c433aec79e7fcd31b4cd55800f # v13.1.0
+        with:
+          luaVersion: '5.4'
+
+      - name: Setup LuaRocks
+        uses: leafo/gh-actions-luarocks@1c4a92caecc8f6850f673cbadfd57b3e555417ce # v6.1.1
+
+      - name: Install luacheck
+        run: luarocks install luacheck 1.2.0-1
+
+      - name: Lint
+        run: luacheck .
+
+      - name: Run test suites
+        run: |
+          shopt -s nullglob
+          suites=(tests/test_*.lua)
+          if [ ${#suites[@]} -eq 0 ]; then
+            echo "::error::No test suite found in tests/"
+            exit 1
+          fi
+          failed=()
+          for suite in "${suites[@]}"; do
+            echo "::group::$suite"
+            if ! lua "$suite"; then
+              failed+=("$suite")
+            fi
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then
+            printf '::error::Failed suite: %s\n' "${failed[@]}"
+            exit 1
+          fi
