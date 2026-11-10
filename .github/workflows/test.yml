@@ -34,8 +34,23 @@ jobs:
       - name: Setup LuaRocks
         uses: leafo/gh-actions-luarocks@1c4a92caecc8f6850f673cbadfd57b3e555417ce # v6.1.1
 
-      - name: Install luacheck
-        run: luarocks install luacheck 1.2.0-1
+      # Rocks are downloaded, checked against pinned SHA-256 hashes, then
+      # installed from the local files only (no unverified dependency fetch).
+      - name: Install luacheck (hash-verified)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/rocks" && cd "$RUNNER_TEMP/rocks"
+          for rock in argparse-0.7.1-1 luafilesystem-1.8.0-1 luacheck-1.2.0-1; do
+            curl -sSfLO "https://luarocks.org/${rock}.src.rock"
+          done
+          sha256sum -c - <<'SUMS'
+          ea30d0643586a20aeb6349ca8cb7db63aefc21d9aa007c7b7168a7c564817879  argparse-0.7.1-1.src.rock
+          576270a55752894254c2cba0d49d73595d37ec4ea8a75e557fdae7aff80e19cf  luafilesystem-1.8.0-1.src.rock
+          b1428283951e2a5f5f4011a0f57ce819af394421be631c910aa76c97ebad624f  luacheck-1.2.0-1.src.rock
+          SUMS
+          luarocks install --deps-mode=none ./argparse-0.7.1-1.src.rock
+          luarocks install --deps-mode=none ./luafilesystem-1.8.0-1.src.rock
+          luarocks install --deps-mode=none ./luacheck-1.2.0-1.src.rock
 
       - name: Lint
         run: luacheck .
