@@ -158,12 +158,14 @@ OrvexORM defines the following types for LuaLS:
 | `OrvexModelOpts` | Model options (primaryKey, softDelete, timestamps, hooks, scopes, relations, adapter, cache) |
 | `OrvexHookMap` | The inline hooks of `opts.hooks`, one typed field per event |
 | `OrvexFindOpts` | Options of `find` / `findAll` / `all` (`select`, `include`) |
-| `OrvexWhere` | A where clause: `{ column = value }` or `{ column = { operator, value } }` |
+| `OrvexWhere` | A where clause: `{ column = value }` or `{ column = OrvexORM.op(operator, value) }` |
+| `OrvexOpMarker` | An operator condition, created by `OrvexORM.op(operator, value)` |
 | `OrvexPaginateResult` | Result of `:paginate()` (`data`, `total`, `page`, `perPage`, `lastPage`) |
 | `OrvexRelationCount` | An entry of `countByRelation` (`instance`, `count`) |
-| `OrvexCacheOpts` | Options of `OrvexCache.new` (`ttl`, `enabled`, `maxEntries`, `sweepInterval`) |
+| `OrvexCacheOpts` | Options of `OrvexCache.new` (`ttl`, `enabled`, `maxEntries`, `maxRows`, `sweepInterval`) |
 | `OrvexCacheStats` | Result of `OrvexORM.cacheStats()` |
 | `OrvexDriver` | The driver contract (`execute`, `scalar`, `transaction?`) for `OrvexAdapter.new` |
+| `OrvexAdapterOptions` | Options of `OrvexAdapter.new(driver, opts?)` (`allowNonAtomicTransactions`) |
 | `OrvexMigration` | Migration definition (name, up, down) |
 | `OrvexRelationDef` | Relation definition |
 

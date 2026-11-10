@@ -164,6 +164,9 @@ local top10 = User.query()
     :limit(10)
     :get()
 
+-- Operateurs dans une table de conditions : OrvexORM.op(operateur, valeur)
+local riches = User.findAll({ job = "police", money = OrvexORM.op(">", 10000) })
+
 -- Pagination automatique
 local page = User.query():where("job", "police"):paginate(2, 10)
 -- page.data, page.total, page.page, page.lastPage
@@ -250,7 +253,7 @@ conditionnelle** et verifie son resultat. Voir le
 ```lua
 OrvexORM.migrations({
     {
-        name = "001_create_users",
+        name = "maressource_001_create_users",  -- nom unique sur toute la base : prefixe-le
         up = function(schema)
             schema:create("users", function(t)
                 t:primaryString("identifier", 60)
@@ -383,7 +386,8 @@ versions instance) retournent le **nombre de lignes touchees** (`0` = rien n'a c
 |---|---|
 | `:where(field, value)` | Egalite (raccourci) |
 | `:where(field, op, value)` | Avec operateur |
-| `:where({ field = value })` | Table |
+| `:where({ field = value })` | Table (egalites) |
+| `:where({ field = OrvexORM.op(op, value) })` | Table avec operateur (une table ordinaire leve une erreur) |
 | `:orWhere(...)` | OR (groupe entre parentheses apres les contraintes du modele) |
 | `:whereColumn(a, op?, b)` | Comparer deux colonnes |
 | `:whereIn(col, values)` | IN |
@@ -432,7 +436,7 @@ Dans la console txAdmin :
 orvexstudio
 ```
 
-Le studio genere un token secret (ou utilise `orvex_studio_token` s'il contient au moins 32 caracteres) et affiche l'URL d'acces :
+Le studio genere un token secret (ou utilise `orvex_studio_token`, obligatoire sur Windows ; un token trop faible fait refuser le demarrage, genere-le avec `openssl rand -hex 32`) et affiche l'URL d'acces :
 ```
 http://localhost:30120/orvexorm/?token=a1b2c3d4...
 ```
@@ -442,7 +446,8 @@ http://localhost:30120/orvexorm/?token=a1b2c3d4...
 - Ajouter, modifier et supprimer des lignes
 - **Loopback uniquement par defaut** (`127.0.0.1`, `::1`) : les autres adresses recoivent un `404`
 - Token dans l'URL accepte seulement au premier chargement, puis envoye dans l'en-tete `X-Studio-Token`
-- Verrouillage anti-bruteforce (5 echecs = IP bloquee 5 min), 120 requetes/min par adresse
+- Verrouillage anti-bruteforce (5 echecs = IP bloquee 5 min), 120 requetes/min par adresse, corps limite a 1 Mio
+- Filtrage et verrouillage sur l'adresse TCP : derriere un reverse proxy sur la meme machine, tout le monde est `127.0.0.1`
 - Session en memoire limitee a 30 minutes, sans cookie persistant
 - Fonctionne avec oxmysql **et** mysql-async (meme detection que l'ORM)
 
@@ -485,8 +490,18 @@ Version de corrections et de durcissement. Liste complete et changements de comp
 - **Import** : `server_script '@orvexorm/lib/import.lua'` charge l'ORM dans ta ressource (les
   methodes des instances et des builders fonctionnent enfin entre ressources).
 - **Valeurs de retour** : `update`, `delete`, `increment`... retournent le nombre de lignes touchees.
-- **Migrations** : `migrate()` / `rollback()` levent une erreur a la premiere migration en echec.
-- **Studio** : loopback uniquement par defaut (`orvex_studio_allow`), token en en-tete pour l'API.
+- **Conditions** : les operateurs en table s'ecrivent `{ money = OrvexORM.op(">", 100) }` ; l'ancienne forme
+  `{ money = { ">", 100 } }` leve une erreur. Les valeurs doivent etre des chaines, booleens ou nombres finis :
+  ne passe jamais un argument d'event client sans le convertir. Les ecritures de classe n'acceptent que des egalites.
+- **Migrations** : `migrate()` / `rollback()` levent une erreur a la premiere migration en echec. Les noms
+  sont uniques sur toute la base (prefixe-les avec ta ressource) et `rollback()` n'annule que les migrations
+  de la ressource qui l'appelle.
+- **Studio** : loopback uniquement par defaut (`orvex_studio_allow`), token en en-tete pour l'API,
+  `orvex_studio_token` trop faible refuse. Les ecritures du Studio fonctionnent enfin sur un vrai FXServer.
+- **Drivers** : un driver personnalise sans `:transaction()` est refuse pour les transactions, sauf
+  `OrvexAdapter.new(driver, { allowNonAtomicTransactions = true })`.
+- **Requetes** : une jointure sur un modele selectionne `table.*` par defaut ; un type de champ inconnu leve
+  une erreur.
 - **Hooks** : les ecritures de classe declenchent les nouveaux hooks `before/afterBulkUpdate`,
   `before/afterBulkDelete`, `before/afterUpsert`, `afterBulkCreate`.
 - **SQL** : identifiants entre backticks (`group`, `key`, `order` utilisables comme colonnes),

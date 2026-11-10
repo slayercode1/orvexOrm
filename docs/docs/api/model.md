@@ -37,6 +37,13 @@ Une mauvaise utilisation **leve une erreur Lua** dont la position pointe vers **
 
 Une erreur SQL remontee par le driver est une erreur Lua elle aussi. Utilise `pcall` pour les capturer.
 
+### Conditions (`where`)
+
+- Dans une table `{ colonne = valeur }`, chaque valeur est une **egalite**. Un operateur s'ecrit `OrvexORM.op(operateur, valeur)` : `{ money = OrvexORM.op(">", 100) }`. Une table ordinaire (l'ancienne syntaxe `{ money = { ">", 100 } }`) leve une erreur.
+- `OrvexORM.op` est accepte par `find`, `findAll`, `findOrFail`, `first`, `exists`, `count`, `pluck`, `sum` / `avg` / `min` / `max`, `countByRelation` et le query builder (donc les scopes).
+- `update` / `updateWhere`, `delete` / `deleteWhere`, `forceDelete`, `restore`, `increment` / `decrement`, `findOrCreate` et `updateOrCreate` n'acceptent que des egalites : un `OrvexORM.op` y leve une erreur.
+- Une valeur doit etre une chaine, un booleen ou un nombre fini (pas de table, de `NaN` ni d'infini). Ne passe jamais un argument d'event client sans le convertir : voir [Valeurs venues du client](/docs/guides/query-builder#valeurs-venues-du-client).
+
 ### Ordre des arguments
 
 L'API a quelques irregularites historiques, conservees pour la compatibilite :
@@ -75,7 +82,7 @@ local player = User.create({ identifier = "license:abc", money = 500 })
 
 ### `Model.find(where?, opts?)` → `OrvexInstance | nil`
 
-Retourne la premiere ligne correspondante, ou `nil`. La requete porte un `LIMIT 1`. `where` accepte les operateurs (`{ money = { ">", 100 } }`) ; sans `where`, retourne la premiere ligne de la table.
+Retourne la premiere ligne correspondante, ou `nil`. La requete porte un `LIMIT 1`. `where` accepte les operateurs (`{ money = OrvexORM.op(">", 100) }`) ; sans `where`, retourne la premiere ligne de la table.
 
 | Option | Type | Description |
 |---|---|---|
@@ -141,7 +148,7 @@ User.upsert({ identifier = "license:abc", money = 2000 })
 
 ### `Model.update(data, where)` → `integer`
 
-Met a jour les lignes correspondant a `where` et retourne le nombre de lignes touchees. Declenche `beforeBulkUpdate(data, where)` puis `afterBulkUpdate(data, where, affected)`.
+Met a jour les lignes correspondant a `where` et retourne le nombre de lignes touchees. Declenche `beforeBulkUpdate(data, where)` puis `afterBulkUpdate(data, where, affected)`. Avec `softDelete`, les lignes supprimees en douceur ne sont pas touchees (`AND deleted_at IS NULL`), sauf si `where` contient lui-meme `deleted_at`. `data` ne peut pas contenir `deleted_at`, ni `created_at` / `updated_at` sans `allowManagedColumns` (voir [Validation](/docs/guides/validation#les-colonnes-gerees-par-lorm)).
 
 ```lua
 local n = User.update({ money = 0 }, { job = "unemployed" })
@@ -156,7 +163,7 @@ Le parametre `where` est **obligatoire** et doit etre non-vide pour eviter de mo
 
 ### `Model.delete(where)` → `integer`
 
-Supprime les lignes correspondant a `where` et retourne le nombre de lignes touchees. Si le soft delete est active, marque les lignes comme supprimees (met `deleted_at`). Declenche `beforeBulkDelete(where)` puis `afterBulkDelete(where, affected)`.
+Supprime les lignes correspondant a `where` et retourne le nombre de lignes touchees. Si le soft delete est active, marque les lignes comme supprimees (met `deleted_at`) ; une ligne deja supprimee garde sa date de suppression (`AND deleted_at IS NULL`). Declenche `beforeBulkDelete(where)` puis `afterBulkDelete(where, affected)`.
 
 ```lua
 User.delete({ job = "unemployed" })
@@ -166,7 +173,7 @@ User.delete({ job = "unemployed" })
 
 ### `Model.createMany(rows)` → `boolean`
 
-Insere plusieurs lignes en une seule requete. Chaque ligne est validee ; `beforeCreate` est declenche pour chaque ligne (sur une copie), puis `afterBulkCreate(rows)` une fois. Aucune instance n'est construite.
+Insere plusieurs lignes en une seule requete. Si les lignes n'ont pas toutes les memes cles, un `INSERT` est fait par jeu de cles, tous dans une meme transaction (aucune colonne n'est perdue). Chaque ligne est validee ; `beforeCreate` est declenche pour chaque ligne (sur une copie), puis `afterBulkCreate(rows)` une fois. Aucune instance n'est construite.
 
 ```lua
 User.createMany({
@@ -180,7 +187,7 @@ User.createMany({
 
 ### `Model.findOrCreate(where, defaults?)` → `OrvexInstance, boolean`
 
-Cherche un enregistrement, ou le cree s'il n'existe pas (avec `where` + `defaults`). Retourne l'instance et un boolean `created`. Ce n'est pas atomique : deux appels simultanes peuvent tous les deux creer la ligne si aucune cle unique ne l'empeche.
+Cherche un enregistrement, ou le cree s'il n'existe pas (avec `where` + `defaults`). Retourne l'instance et un boolean `created`. `where` n'accepte que des egalites, puisqu'il sert aussi de donnees a la ligne creee. Ce n'est pas atomique : deux appels simultanes peuvent tous les deux creer la ligne si aucune cle unique ne l'empeche. Avec `softDelete`, la recherche ne voit pas les lignes supprimees en douceur : une ligne "supprimee" qui correspond donne une **nouvelle** ligne. Pose un index unique sur les colonnes du `where` pour qu'un doublon leve une erreur au lieu d'etre insere (c'est vrai aussi pour `updateOrCreate`).
 
 ```lua
 local player, created = User.findOrCreate(
@@ -197,7 +204,7 @@ end
 
 ### `Model.updateOrCreate(where, data)` → `OrvexInstance, boolean`
 
-Met a jour un enregistrement existant (via `instance:update`, donc `beforeUpdate`/`afterUpdate`), ou en cree un nouveau (`beforeCreate`/`afterCreate`).
+Met a jour un enregistrement existant (via `instance:update`, donc `beforeUpdate`/`afterUpdate`), ou en cree un nouveau (`beforeCreate`/`afterCreate`). Comme `findOrCreate`, la recherche ignore les lignes supprimees en douceur : un index unique evite les doublons.
 
 ```lua
 local player, created = User.updateOrCreate(
@@ -210,7 +217,7 @@ local player, created = User.updateOrCreate(
 
 ### `Model.increment(column, amount, where)` → `integer`
 
-Incremente une colonne numerique, de facon atomique cote MySQL (`money = money + ?`). `amount` est obligatoire. Aucun hook n'est declenche.
+Incremente une colonne numerique, de facon atomique cote MySQL (`money = money + ?`). `amount` est obligatoire et doit etre un nombre fini (une chaine, `NaN` ou l'infini levent une erreur). Avec `softDelete`, les lignes supprimees en douceur ne sont pas touchees (comme `decrement`). Aucun hook n'est declenche.
 
 ```lua
 User.increment("money", 100, { identifier = "license:abc" })
@@ -317,6 +324,10 @@ User.restore({ identifier = "license:abc" })
 ### `Model.createWith(data)` → `OrvexInstance`
 
 Cree un enregistrement avec des relations imbriquees (nested writes). Les cles de relation sont automatiquement detectees.
+
+:::danger Jamais de donnees client brutes
+**Toute** cle de `data` qui porte le nom d'une relation est traitee comme une ecriture imbriquee : un client qui ajoute `roles = { { name = "admin" } }` a sa table cree des lignes liees. Ne passe jamais une table recue d'un client a `createWith` sans la filtrer : copie seulement les champs attendus.
+:::
 
 ```lua
 -- Definir les relations
@@ -530,8 +541,8 @@ Definit une relation N → N via une table pivot.
 | Option | Type | Description |
 |---|---|---|
 | `pivot` | `string` | Nom de la table pivot **(obligatoire)** |
-| `foreignKey` | `string` | Colonne pivot → cette table |
-| `otherKey` | `string` | Colonne pivot → table liee |
+| `foreignKey` | `string` | Colonne pivot → cette table **(obligatoire)** |
+| `otherKey` | `string` | Colonne pivot → table liee **(obligatoire)** |
 | `localKey` | `string?` | Colonne sur cette table (defaut: primaryKey) |
 
 ```lua
@@ -557,7 +568,9 @@ User.belongsToMany("roles", Role, {
 | `adapter` | `OrvexAdapter` | defaut | Adaptateur propre au modele |
 | `cache` | `OrvexCache` | cache global | Cache propre au modele (voir [Cache](/docs/guides/cache#un-cache-par-modele)) |
 
-Avec `timestamps` ou `softDelete`, les colonnes `created_at`, `updated_at` et `deleted_at` sont acceptees par la validation meme si tu ne les declares pas dans `fields`.
+| `allowManagedColumns` | `boolean` | `false` | Autorise `created_at` / `updated_at` dans les donnees des ecritures (imports) |
+
+Avec `timestamps` ou `softDelete`, les colonnes `created_at`, `updated_at` et `deleted_at` sont acceptees par la validation meme si tu ne les declares pas dans `fields`. Tes donnees ne peuvent pas les ecrire : `deleted_at` jamais, `created_at` / `updated_at` seulement avec `allowManagedColumns = true` ; les hooks `before*` le peuvent toujours.
 
 ```lua
 local User = ORM.model("users", { ... }, {
@@ -586,7 +599,7 @@ User.applyRelations()
 
 ## Soft Delete
 
-Quand `softDelete = true`, les suppressions marquent la ligne avec `deleted_at` au lieu de la supprimer.
+Quand `softDelete = true`, les suppressions marquent la ligne avec `deleted_at` au lieu de la supprimer. Les ecritures de classe `update` / `updateWhere`, `increment` / `decrement` et `delete` ajoutent `deleted_at IS NULL` : elles ne touchent pas les lignes deja supprimees (sauf si le `where` contient `deleted_at`). `restore` vise toujours les lignes supprimees, `forceDelete` toutes les lignes du `where`.
 
 ```lua
 local User = ORM.model("users", { ... }, { softDelete = true })

@@ -86,17 +86,31 @@ Les colonnes que l'ORM remplit lui-meme sont **acceptees automatiquement** quand
 | `timestamps = true` | `created_at`, `updated_at` |
 | `softDelete = true` | `deleted_at` |
 
-Elles sont typees `"datetime"` (une chaine `"AAAA-MM-JJ HH:MM:SS"`, en UTC quand c'est l'ORM qui les remplit). Tu peux donc fixer `created_at` lors d'un import, ou le modifier dans un hook :
+Elles sont typees `"datetime"` (une chaine `"AAAA-MM-JJ HH:MM:SS"`, en UTC quand c'est l'ORM qui les remplit). Les donnees que tu passes a `create`, `createMany`, `createWith`, `upsert`, `update` / `updateWhere` et `instance:update` ne peuvent **pas** les ecrire, pour qu'un champ venu du client ne falsifie ni une date ni une suppression :
+
+- `deleted_at` est toujours refuse (`'deleted_at' is managed by soft delete, use delete() / restore() instead`) ;
+- `created_at` / `updated_at` sont refuses, sauf si le modele a l'option `allowManagedColumns = true` (un import qui garde les dates d'origine, par exemple).
+
+L'ORM continue de les remplir lui-meme, et un hook `before*` peut toujours les fixer :
 
 ```lua
 local User = ORM.model("users", { identifier = "string" }, { timestamps = true })
 
-User.create({ identifier = "license:abc", created_at = "2024-01-01 00:00:00" })  -- OK
+User.create({ identifier = "license:abc", created_at = "2024-01-01 00:00:00" })
+-- Error: create(): 'created_at' is stamped by the ORM (timestamps = true); set allowManagedColumns = true ...
 
 User.beforeCreate(function(data)
-    data.updated_at = "2024-01-01 00:00:00"  -- OK aussi
+    data.updated_at = "2024-01-01 00:00:00"  -- OK : un hook peut les fixer
 end)
+
+local Imported = ORM.model("users", { identifier = "string" }, {
+    timestamps = true,
+    allowManagedColumns = true,
+})
+Imported.create({ identifier = "license:abc", created_at = "2024-01-01 00:00:00" })  -- OK
 ```
+
+`Model.update` et `instance:update` gardent un `updated_at` fixe par un hook (ou par tes donnees avec `allowManagedColumns`) et le remplissent sinon.
 
 Sans l'option, ces colonnes sont des colonnes comme les autres : elles doivent etre declarees. Si tu les declares toi-meme, ton type est conserve.
 

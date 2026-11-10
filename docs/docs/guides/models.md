@@ -140,11 +140,13 @@ local Inventory = OrvexORM.model("inventories", {
 
 ## Colonnes aux noms reserves
 
-Les noms de colonnes et de tables sont toujours entoures de backticks dans le SQL genere : une colonne `group`, `key`, `order` ou `rank` (comme dans l'exemple *Joueurs* ci-dessus) fonctionne sans precaution. Les noms ne peuvent contenir que des lettres, des chiffres, `_` et `.`.
+Les noms de colonnes et de tables sont toujours entoures de backticks dans le SQL genere : une colonne `group`, `key`, `order` ou `rank` (comme dans l'exemple *Joueurs* ci-dessus) fonctionne sans precaution. Les noms ne peuvent contenir que des lettres, des chiffres, `_` et `.`, sans segment vide (`a..b`, `.a` et `a.` sont refuses).
 
 ## Ce que le schema controle
 
-Le schema (`fields`) n'est pas qu'une indication : une ecriture avec une cle absente du schema est **refusee** (`Unknown field 'x'`). Declare toutes les colonnes que tu ecris. Seules exceptions : `created_at` / `updated_at` avec `timestamps = true` et `deleted_at` avec `softDelete = true`, que l'ORM gere. Voir [Validation](/docs/guides/validation#colonnes-inconnues).
+Le schema (`fields`) n'est pas qu'une indication : une ecriture avec une cle absente du schema est **refusee** (`Unknown field 'x'`). Declare toutes les colonnes que tu ecris. Seules exceptions : `created_at` / `updated_at` avec `timestamps = true` et `deleted_at` avec `softDelete = true`, que l'ORM gere. Tes donnees ne peuvent pas les ecrire : `deleted_at` jamais (utilise `delete()` / `restore()`), `created_at` / `updated_at` seulement avec `allowManagedColumns = true`. Voir [Validation](/docs/guides/validation#colonnes-inconnues).
+
+Chaque type doit etre l'un de `string`, `number`, `boolean`, `json`, `auto`, `date`, `datetime`, `timestamp`. Un type inconnu (une faute de frappe comme `"int"` ou `"text"`) leve une erreur des `OrvexORM.model(...)`, au lieu de desactiver la verification de ce champ.
 
 ## Toutes les options
 
@@ -153,6 +155,7 @@ Le schema (`fields`) n'est pas qu'une indication : une ecriture avec une cle abs
 | `primaryKey` | `"id"` | Colonne qui identifie une ligne |
 | `timestamps` | `false` | Remplit `created_at` / `updated_at` |
 | `softDelete` | `false` | `delete()` remplit `deleted_at` au lieu de supprimer |
+| `allowManagedColumns` | `false` | Laisse tes donnees fixer `created_at` / `updated_at` (imports) |
 | `hooks` | `nil` | Un hook par evenement (voir [Hooks](/docs/api/model#hooks-lifecycle)) |
 | `scopes` | `nil` | Filtres reutilisables, appelables comme methodes |
 | `relations` | `nil` | Callback de declaration des relations, lancee par `applyRelations()` |

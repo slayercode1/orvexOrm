@@ -209,6 +209,8 @@ User.belongsToMany("roles", Role, {
 })
 ```
 
+`pivot`, `foreignKey` and `otherKey` are required: without one of them, the definition raises an error. A relation's keys (and those passed to `attach` / `detach`) must be strings, booleans or finite numbers; any other value raises an error instead of changing the query's condition.
+
 ### Reading a player's roles
 
 ```lua
@@ -419,6 +421,10 @@ but better:
 The parent and the related rows of a `belongsToMany` (created with `create`) fire all their hooks. The `hasOne` / `hasMany` children inserted in batch fire `beforeCreate` (once per row, foreign key already set) then `afterBulkCreate` (once per relation, after the transaction), but not `afterCreate`. `belongsTo` keys in the data are ignored.
 
 The parent and the `belongsToMany` rows are written **before** the transaction: this is not a fully atomic write (see [`Model.createWith`](/docs/api/model#modelcreatewithdata--orvexinstance)).
+
+:::danger Filter client data
+Any key named like a relation is a nested write. Never pass a table received from a client to `createWith` as is: a `roles` field added by the client would create related rows. Build `data` from the fields you expect only.
+:::
 
 ---
 

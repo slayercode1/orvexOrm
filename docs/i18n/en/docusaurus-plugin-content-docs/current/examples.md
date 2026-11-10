@@ -284,9 +284,9 @@ end, false)
 -- Search for players with combined filters
 RegisterCommand("search", function(src, args)
     local results = User.query()
-        :where({ job = { "IN", { "police", "medic" } } })
-        :where({ money = { "BETWEEN", { 1000, 50000 } } })
-        :where({ group = { "!=", "banned" } })
+        :where({ job = OrvexORM.op("IN", { "police", "medic" }) })
+        :where({ money = OrvexORM.op("BETWEEN", { 1000, 50000 }) })
+        :where({ group = OrvexORM.op("!=", "banned") })
         :orderBy("money", "DESC")
         :limit(20)
         :get()
@@ -442,7 +442,7 @@ RegisterCommand("vipcops", function()
     -- Combine with findAll and operators
     local richCops = User.findAll({
         job   = "police",
-        money = { ">", 10000 },
+        money = OrvexORM.op(">", 10000),
     })
     print(#richPlayers, #vipCops, #richCops)
 end, true)

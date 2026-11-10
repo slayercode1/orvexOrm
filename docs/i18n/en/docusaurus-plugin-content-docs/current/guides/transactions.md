@@ -133,7 +133,7 @@ Returns the list of pending queries (`{ query = "...", values = {...} }`), usefu
 
 ### Custom adapter
 
-`OrvexORM.transaction(fn, adapter)` and `OrvexORM.transaction(adapter)` use the given adapter instead of the default one. If its driver does not implement `transaction`, the adapter runs the queries **one by one, without atomicity**: see [setAdapter](/docs/api/orm#ormsetadapteradapter).
+`OrvexORM.transaction(fn, adapter)` and `OrvexORM.transaction(adapter)` use the given adapter instead of the default one. If its driver does not implement `transaction`, `commit()` **raises an error**, unless the adapter was created with `OrvexAdapter.new(driver, { allowNonAtomicTransactions = true })`: the queries then run **one by one, without atomicity**; if one fails after others were applied, `commit()` returns `false` but still invalidates the cache of the tables it touched. See [setAdapter](/docs/api/orm#ormsetadapteradapter).
 
 ## Real-world examples
 

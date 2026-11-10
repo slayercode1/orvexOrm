@@ -19,7 +19,7 @@ orvexstudio
 ```
 
 The studio:
-1. Generates a **secret token** from the system's secure random source, or uses the `orvex_studio_token` convar if it holds at least 32 characters
+1. Generates a **secret token** from the system's secure random source, or uses the `orvex_studio_token` convar if it is set (it must be strong enough, otherwise the Studio refuses to start: see [Fixed token](#fixed-token-orvex_studio_token))
 2. Enables the web routes built into the resource
 3. Prints the access URL in the console
 
@@ -29,8 +29,13 @@ The studio:
 ══════════════════════════════════════════════════
 
   URL : http://localhost:30120/orvexorm/?token=a1b2c3d4e5f6...
+  This URL holds the token: console output may be mirrored to txAdmin and log files, stop the Studio when done.
 
   Allowed addresses : 127.0.0.1, ::1 (convar orvex_studio_allow)
+
+  The allowlist and the lockout use the TCP peer address (req.address).
+  Behind a reverse proxy on the same host every client looks like 127.0.0.1:
+  the loopback default then admits everyone the proxy serves.
 
   Share this URL only with trusted people.
   Traffic is plain HTTP: from a remote machine, use an SSH tunnel
@@ -41,6 +46,8 @@ The studio:
 
 ══════════════════════════════════════════════════
 ```
+
+The URL holds the token: the console may be mirrored to txAdmin or to log files, hence the warning right below it. Stop the Studio as soon as you are done, and do not paste the full console into a ticket or a public channel while it runs.
 
 To stop it:
 ```
@@ -92,12 +99,38 @@ The Studio has no HTTPS: when you widen the list, the token and your database co
 :::
 
 :::caution Behind a proxy (txAdmin, reverse proxy)
-Behind a proxy, the address the Studio sees is **the proxy's**, for every client. The allowlist, the request limit and the brute-force lockout then apply to the proxy as a whole. Never allow the address of a proxy exposed to the internet.
+The allowlist, the request limit and the brute-force lockout use the **TCP peer address** (`req.address`), not a header such as `X-Forwarded-For`. Behind a proxy, that is **the proxy's** address, for every client. With a reverse proxy on the **same host**, everyone therefore arrives as `127.0.0.1`: the default (loopback) allowlist admits **every** client the proxy serves, and a single lockout blocks everyone. Never expose the Studio's `/orvexorm/` path through a public proxy, and never allow the address of a proxy exposed to the internet.
 :::
 
 ## Security
 
-The studio is protected by a **random token** generated on every launch. If the system's secure random source is unavailable, startup fails instead of creating a predictable token. You can provide a stable token with `set orvex_studio_token "..."`; it must contain at least 32 characters.
+The studio is protected by a **random token** generated on every launch from `/dev/urandom`. If that source is unavailable (**Windows** server), the Studio does not generate a predictable token: it refuses to start until `orvex_studio_token` is set.
+
+### Fixed token: `orvex_studio_token`
+
+You can provide your own token, which is required on Windows:
+
+```bash
+openssl rand -hex 32
+```
+
+```cfg title="server.cfg"
+set orvex_studio_token "paste-the-64-generated-characters-here"
+```
+
+The token is **checked** on launch: it needs at least 32 characters, at least 10 distinct characters and about 128 bits of entropy (length x log2 of the number of distinct characters). A token that is too short or too repetitive (`aaaa...`, `12341234...`, a password) makes the Studio refuse to start, with this console message:
+
+```
+orvex_studio_token is too weak: use at least 32 random characters (128 bits or more). Generate one with: openssl rand -hex 32
+```
+
+`openssl rand -hex 32` (64 hex characters) and `openssl rand -base64 32` pass comfortably.
+
+:::info Host without `/dev/urandom` (Windows)
+The page's CSP nonce, which only guards against script injection, then comes from `math.random` (seeded from the clock and the token) and the console prints a warning: `No /dev/urandom on this host: the CSP nonce is weaker on this host ...`. The token itself never falls back to that source: it comes from `orvex_studio_token`.
+:::
+
+### Protections
 
 - **Network filtering**: a request from an address outside `orvex_studio_allow` gets a plain `404 Not Found`, with no log
 - Stopped Studio: every request gets the same `404 Not Found` (no log, nothing reveals that it exists)
@@ -107,7 +140,8 @@ The studio is protected by a **random token** generated on every launch. If the 
 - The token expires after **30 minutes**; run `orvexstudio` again to start a new session
 - Without a valid token, the request returns `403`
 - **Brute-force protection**: an IP is locked out for **5 minutes** after **5 invalid tokens**
-- Requests are limited to **120 per minute per address** (checked before the token), and request bodies to **1 MiB**
+- Requests are limited to **120 per minute per address** (checked before the token), and request bodies to **1 MiB** (beyond that: `422`). The body is only read after the token is verified
+- A write (insert, update, delete) accepts only **string, number, boolean or `null`** values for the columns and the primary key: a JSON object or array gets a `422`
 - Rejections for the request limit or the lockout are logged **once** per window or per lockout, not on every request
 - The page is served with a strict CSP (scripts and styles limited to a per-load nonce) and row data is always inserted as text: a value stored by a player cannot run a script in your browser
 

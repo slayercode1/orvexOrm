@@ -72,6 +72,15 @@ When you chain multiple `:where()` calls, they are joined by **AND** (both condi
 
 ## All operators
 
+An operator can be written two ways: with 3 arguments (`:where("money", ">", 1000)`), or inside a table of conditions with `OrvexORM.op(operator, value)`:
+
+```lua
+User.query():where({ job = "police", money = OrvexORM.op(">", 1000) }):get()
+-- SQL: WHERE `job` = ? AND `money` > ?
+```
+
+In a table, a plain value is an equality; only a value built by `OrvexORM.op` is read as an operator. An ordinary table (`{ money = { ">", 1000 } }`, the old syntax) **raises an error**. The same rule applies to `orWhere`, and to the table-form `where` of `find`, `findAll`, `findOrFail`, `first`, `exists`, `count`, `pluck`, the aggregates, `countByRelation` and scopes.
+
 ### Greater than / Less than
 
 ```lua
@@ -84,7 +93,8 @@ When you chain multiple `:where()` calls, they are joined by **AND** (both condi
 ### Not equal to
 
 ```lua
-:where({ status = { "!=", "banned" } })
+:where("status", "!=", "banned")
+:where({ status = OrvexORM.op("!=", "banned") })  -- same condition, table form
 -- SQL: WHERE status != ?
 ```
 
@@ -92,7 +102,7 @@ When you chain multiple `:where()` calls, they are joined by **AND** (both condi
 
 ```lua
 -- All jobs containing "poli"
-:where({ job = { "LIKE", "%poli%" } })
+:where({ job = OrvexORM.op("LIKE", "%poli%") })
 -- SQL: WHERE job LIKE ?
 ```
 
@@ -105,7 +115,7 @@ The `%` is a wildcard that matches any text:
 
 ```lua
 -- Police officers, medics, or firefighters
-:where({ job = { "IN", { "police", "medic", "firefighter" } } })
+:where({ job = OrvexORM.op("IN", { "police", "medic", "firefighter" }) })
 -- SQL: WHERE job IN (?, ?, ?)
 ```
 
@@ -113,7 +123,7 @@ The `%` is a wildcard that matches any text:
 
 ```lua
 -- Players with between $500 and $5000
-:where({ money = { "BETWEEN", { 500, 5000 } } })
+:where({ money = OrvexORM.op("BETWEEN", { 500, 5000 }) })
 -- SQL: WHERE money BETWEEN ? AND ?
 ```
 
@@ -121,11 +131,11 @@ The `%` is a wildcard that matches any text:
 
 ```lua
 -- Players without a job
-:where({ job = { "IS", "NULL" } })
+:where({ job = OrvexORM.op("IS", "NULL") })   -- or :whereNull("job")
 -- SQL: WHERE job IS NULL
 
 -- Players with a job
-:where({ job = { "IS NOT", "NULL" } })
+:where({ job = OrvexORM.op("IS NOT", "NULL") })   -- or :whereNotNull("job")
 -- SQL: WHERE job IS NOT NULL
 ```
 
@@ -133,7 +143,7 @@ The `%` is a wildcard that matches any text:
 
 ### Shortcuts for common filters
 
-Instead of the `{ col = { "OP", val } }` syntax, you can use dedicated methods:
+Instead of `{ col = OrvexORM.op("OP", val) }`, you can use dedicated methods:
 
 ```lua
 -- whereIn: among a list of values
@@ -151,6 +161,25 @@ User.query():whereNotBetween("money", 0, 100):get()
 -- whereLike: text search
 User.query():whereLike("name", "%john%"):get()
 ```
+
+---
+
+## Values coming from the client
+
+A condition value (`where`, `orWhere`, `IN` / `BETWEEN` elements, `after` / `before` cursors) must be a **string, a boolean or a finite number**. A table, `nil`, `NaN` or infinity raise an error before the query is sent.
+
+Never forward a net-event argument as is into a `where`: a client can send a table instead of the expected string. Convert and check it first:
+
+```lua
+RegisterNetEvent("garage:spawn", function(plate)
+    local src = source
+    if type(plate) ~= "string" or #plate > 8 then return end  -- reject everything else
+    local vehicle = Vehicle.find({ plate = plate, owner = GetPlayerIdentifier(src, 0) })
+    -- ...
+end)
+```
+
+A client cannot forge an operator either: an argument decoded from the network can be shaped like `{ "LIKE", "%" }`, but only a value created by `OrvexORM.op` on the server is read as an operator. `User.find({ identifier = payload })` with a table therefore raises an error instead of becoming `identifier LIKE '%'`.
 
 ---
 
@@ -330,6 +359,8 @@ end
 | `perPage` | `integer` | Number of items per page (default: 15) |
 | `lastPage` | `integer` | Number of the last page |
 
+`page` and `perPage` must be positive integers; a page so large that the `OFFSET` would overflow raises an error.
+
 ### Shortcut: `:first()`
 
 If you just want the **first** result:
@@ -392,6 +423,10 @@ Vehicle.query()
 - **LEFT JOIN**: "I want all players, with or without a vehicle"
 - **INNER JOIN**: "I want only players who have a vehicle"
 - **RIGHT JOIN**: rarely used, prefer LEFT JOIN by swapping the tables
+:::
+
+:::caution Columns of joined tables
+On a model query with a join, the default select is `users.*` (the model's table), not `*`: a same-named column (`id`...) of the joined table cannot overwrite the instance's primary key. To read columns of the joined table, list them with `:select()`, as in the examples above.
 :::
 
 ---
@@ -507,6 +542,8 @@ User.query():chunkById(100, function(players, chunkIndex)
 end, "identifier")  -- unique column; "id" by default
 ```
 
+A `:limit(n)` set on the builder caps the total number of rows scanned. `chunkById` refuses `:offset()` (a keyset page skips no rows): filter with `:where(column, ">", key)` instead.
+
 ### `:chunk(size, callback)` — Batch processing (OFFSET)
 
 Same idea with `LIMIT` / `OFFSET`. Simpler, but MySQL rereads every previous row for each batch (slow on a large table), and if the callback changes rows so that they no longer match the filter, rows are **skipped**. Keep it for small read-only tables.
@@ -519,6 +556,8 @@ User.query():chunk(100, function(players, chunkIndex)
 end)
 ```
 
+Here too, a `:limit(n)` caps the total number of rows scanned, and the scan starts at the builder's `:offset()`.
+
 ---
 
 ## Full example
@@ -528,7 +567,7 @@ Here's a realistic example — a leaderboard of the richest players:
 ```lua
 -- Top 10 richest players who aren't banned
 local top10 = User.query()
-    :where({ status = { "!=", "banned" } })
+    :where({ status = OrvexORM.op("!=", "banned") })
     :where("money", ">", 0)
     :orderBy("money", "DESC")
     :limit(10)

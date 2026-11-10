@@ -48,6 +48,10 @@ print(player.inventory[1].item)     -- "bread"
 
 Tu n'as **rien a faire** — la conversion est transparente.
 
+:::caution JSON invalide en base
+Si une colonne `"json"` contient un texte qui n'est pas du JSON valide (ecrit par du SQL brut ou un outil externe), la lecture ne leve pas d'erreur : le champ garde la **chaine brute** (comme avec `"auto"`) et un avertissement nommant le champ (jamais son contenu) est journalise. Verifie `type(player.position) == "table"` avant de l'utiliser si la colonne peut etre ecrite hors de l'ORM.
+:::
+
 ## Le type `"auto"` (detection automatique)
 
 Le type `"auto"` detecte automatiquement si une valeur doit etre convertie :

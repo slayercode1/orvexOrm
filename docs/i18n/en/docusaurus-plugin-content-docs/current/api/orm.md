@@ -36,7 +36,8 @@ Creates a new model linked to a MySQL table.
 |---|---|---|---|
 | `primaryKey` | `string` | `"id"` | Name of the primary key column |
 | `timestamps` | `boolean` | `false` | Fills `created_at` / `updated_at`; these columns are accepted even if they are not in `fields` |
-| `softDelete` | `boolean` | `false` | `delete()` fills `deleted_at` instead of deleting; reads exclude those rows |
+| `softDelete` | `boolean` | `false` | `delete()` fills `deleted_at` instead of deleting; reads and class-level writes exclude those rows |
+| `allowManagedColumns` | `boolean` | `false` | Allows `created_at` / `updated_at` in the data of `create`, `createMany`, `upsert`, `update` (otherwise an error). `deleted_at` is always refused |
 | `hooks` | `table` | `nil` | One hook per event: `{ beforeCreate = fn, afterBulkUpdate = fn, ... }` (see [Hooks](/docs/api/model#hooks-lifecycle)) |
 | `scopes` | `table` | `nil` | Reusable filters: `{ rich = function(b) b:where(...) end }`, callable as `User.rich()` |
 | `relations` | `function` | `nil` | `function(M) M.hasMany(...) end`, run by `Model.applyRelations()` |
@@ -55,6 +56,8 @@ Creates a new model linked to a MySQL table.
 | `"datetime"` | Date and time (`"2024-03-15 14:30:00"`) |
 | `"timestamp"` | Timestamp (`"2024-03-15 14:30:00"`) |
 | `"auto"` | Automatic detection (table → JSON, JSON string → table) |
+
+Any other type (a typo such as `"int"` or `"text"`) raises an error as soon as the model is defined: `Field 'x': unknown type 'int' (supported: string, number, boolean, json, auto, date, datetime, timestamp)`.
 
 ### Return
 
@@ -114,7 +117,7 @@ After a successful commit, the global cache is invalidated for every table writt
 
 ## `ORM.enableCache(opts?)`
 
-Enables the global cache with an optional TTL. The global cache holds at most **1000 entries**; beyond that, the least recently read ones are evicted (LRU). For another limit, give a model its own cache (`opts.cache`).
+Enables the global cache with an optional TTL. The global cache holds at most **1000 entries**; beyond that, the least recently read ones are evicted (LRU). A result of more than **5000 rows** is not cached. For other limits (`maxEntries`, `maxRows`), give a model its own cache (`opts.cache`, see [Cache](/docs/guides/cache#one-cache-per-model)).
 
 ### Parameters
 
@@ -178,7 +181,7 @@ print(("Cache: %d hits, %d misses (%.0f%% hit rate), %d entries")
 
 ## `ORM.setAdapter(adapter)`
 
-Replaces the default database adapter (used by models created **after** the call, transactions, `raw`, `rawExec` and migrations). An adapter is built with the global `OrvexAdapter` class, available in orvexorm and in every resource that uses `lib/import.lua`:
+Replaces the default database adapter (used by models created **after** the call, transactions, `raw`, `rawExec` and migrations). An adapter is built with the global `OrvexAdapter` class, available in orvexorm and in every resource that uses `lib/import.lua`: `OrvexAdapter.new(driver, opts?)`.
 
 ```lua
 local MyDriver = {}
@@ -210,7 +213,15 @@ OrvexORM.setAdapter(OrvexAdapter.new(setmetatable({}, MyDriver)))
 | `driver:scalar(sql, params)` | Yes | write query | `INSERT`: the inserted id; `UPDATE`/`DELETE`: the affected row count (`number` or `{ affectedRows = n }`) |
 | `driver:transaction(queries)` | No | `{ { query, values }, ... }` | `boolean`: `true` if everything was applied |
 
-Without `transaction`, the adapter runs the queries one by one and **is not atomic**: a failing query does not roll back the previous ones. Driver methods may *yield* (`Citizen.Await`).
+Without `transaction`, the adapter **refuses** transactions: `OrvexORM.transaction`, `createMany` with several key sets and `createWith` raise an error (`this driver has no :transaction(), so a transaction cannot be atomic`). To accept a query-by-query, **non-atomic** run anyway, opt in explicitly:
+
+```lua
+OrvexORM.setAdapter(OrvexAdapter.new(setmetatable({}, MyDriver), {
+    allowNonAtomicTransactions = true,  -- a failing query does not roll back the previous ones
+}))
+```
+
+In this mode, a failure returns `false`. If queries already ran before the failure (partial commit), the transaction still invalidates the cache of every table it touches (the whole cache for a raw statement whose tables cannot be told): no read can serve a stale row. The database keeps those partial changes. Driver methods may *yield* (`Citizen.Await`).
 
 The shipped driver is `OrvexMySQLDriver` (`OrvexAdapter.new(OrvexMySQLDriver.new())`), see [MySQL driver](/docs/installation#mysql-driver).
 
@@ -250,7 +261,7 @@ OrvexORM.migrations({
 
 ## `ORM.migrate(adapter?)`
 
-Runs all pending migrations, in order. **On the first failing migration**, it is not recorded, the following ones are not run, and an error is raised: `[OrvexORM] Migration of migration '<name>' failed (N migration(s) applied before it): <driver error>`. A statement for which the driver returns `nil` counts as a failure.
+Runs all pending migrations, in order, in a new batch recorded under the name of the calling resource (`GetCurrentResourceName()`). A migration name is **unique across the whole database**: a name already recorded by another resource raises an error before anything runs. So prefix your names with your resource name (`"garage_001_create_vehicles"`). **On the first failing migration**, it is not recorded, the following ones are not run, and an error is raised: `[OrvexORM] Migration of migration '<name>' failed (N migration(s) applied before it): <driver error>`. A statement for which the driver returns `nil` counts as a failure. An applied migration whose tracking row cannot be written raises an error too.
 
 ### Parameters
 
@@ -283,7 +294,7 @@ MySQL commits each `CREATE` / `ALTER` immediately: if a migration has several st
 
 ## `ORM.rollback(adapter?)`
 
-Rolls back the last batch of migrations (newest first). If a `down` fails, its migration stays recorded and an error is raised, as with `migrate()`.
+Rolls back the last batch of migrations **of the calling resource** (newest first). Only migrations this resource registered (`OrvexORM.migrations`) and applied are rolled back: `rollback()` never touches another resource's migrations. If a `down` fails, its migration stays recorded and an error is raised, as with `migrate()`.
 
 ### Parameters
 

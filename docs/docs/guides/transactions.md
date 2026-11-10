@@ -133,7 +133,7 @@ Retourne la liste des requetes en attente (`{ query = "...", values = {...} }`),
 
 ### Adaptateur personnalise
 
-`OrvexORM.transaction(fn, adapter)` et `OrvexORM.transaction(adapter)` utilisent l'adaptateur donne au lieu de celui par defaut. Si son driver n'implemente pas `transaction`, l'adaptateur execute les requetes **une par une, sans atomicite** : voir [setAdapter](/docs/api/orm#ormsetadapteradapter).
+`OrvexORM.transaction(fn, adapter)` et `OrvexORM.transaction(adapter)` utilisent l'adaptateur donne au lieu de celui par defaut. Si son driver n'implemente pas `transaction`, `commit()` **leve une erreur**, sauf si l'adaptateur a ete cree avec `OrvexAdapter.new(driver, { allowNonAtomicTransactions = true })` : les requetes partent alors **une par une, sans atomicite** ; si l'une echoue apres d'autres deja appliquees, `commit()` retourne `false` mais invalide le cache des tables touchees. Voir [setAdapter](/docs/api/orm#ormsetadapteradapter).
 
 ## Exemples concrets
 

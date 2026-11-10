@@ -86,17 +86,31 @@ The columns the ORM fills itself are **accepted automatically** when the matchin
 | `timestamps = true` | `created_at`, `updated_at` |
 | `softDelete = true` | `deleted_at` |
 
-They are typed `"datetime"` (a `"YYYY-MM-DD HH:MM:SS"` string, in UTC when the ORM fills it). So you can set `created_at` during an import, or change it in a hook:
+They are typed `"datetime"` (a `"YYYY-MM-DD HH:MM:SS"` string, in UTC when the ORM fills it). The data you pass to `create`, `createMany`, `createWith`, `upsert`, `update` / `updateWhere` and `instance:update` can **not** write them, so a field coming from the client can forge neither a date nor a deletion:
+
+- `deleted_at` is always refused (`'deleted_at' is managed by soft delete, use delete() / restore() instead`);
+- `created_at` / `updated_at` are refused unless the model has the `allowManagedColumns = true` option (an import that keeps the original dates, for example).
+
+The ORM still fills them itself, and a `before*` hook can still set them:
 
 ```lua
 local User = ORM.model("users", { identifier = "string" }, { timestamps = true })
 
-User.create({ identifier = "license:abc", created_at = "2024-01-01 00:00:00" })  -- OK
+User.create({ identifier = "license:abc", created_at = "2024-01-01 00:00:00" })
+-- Error: create(): 'created_at' is stamped by the ORM (timestamps = true); set allowManagedColumns = true ...
 
 User.beforeCreate(function(data)
-    data.updated_at = "2024-01-01 00:00:00"  -- OK too
+    data.updated_at = "2024-01-01 00:00:00"  -- OK: a hook may set them
 end)
+
+local Imported = ORM.model("users", { identifier = "string" }, {
+    timestamps = true,
+    allowManagedColumns = true,
+})
+Imported.create({ identifier = "license:abc", created_at = "2024-01-01 00:00:00" })  -- OK
 ```
+
+`Model.update` and `instance:update` keep an `updated_at` set by a hook (or by your data with `allowManagedColumns`) and fill it otherwise.
 
 Without the option, these columns are ordinary columns: they must be declared. If you declare them yourself, your type is kept.
 

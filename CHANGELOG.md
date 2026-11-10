@@ -55,6 +55,64 @@ de comportement a verifier avant de mettre a jour sont regroupes dans
   (avant, la condition disparaissait : `detach` supprimait les liens de **tous** les parents).
 - **Le comptage de `count()` / `paginate()` avec `having()` sans `groupBy()`** passe par une table
   derivee (avant, `paginate()` ignorait `having`).
+- **Operateurs en table : `ORM.op(operateur, valeur)`.** La forme `{ colonne = { operateur, valeur } }`
+  est supprimee partout (`where` / `orWhere` en table, `find`, `findAll`, `findOrFail`, `first`,
+  `exists`, `count`, `pluck`, agregations, `countByRelation`, scopes) : ecris
+  `{ money = ORM.op(">", 1000) }` (alias `OrvexBuilder.op`). Une table ordinaire comme valeur leve une
+  erreur. Seule une valeur creee par `ORM.op` cote serveur est lue comme un operateur : un argument
+  d'event client de la forme `{ "LIKE", "%" }` ne peut plus transformer une egalite en `LIKE '%'`.
+- **Egalites uniquement** dans le `where` de `update` / `updateWhere`, `delete` / `deleteWhere`,
+  `forceDelete`, `restore`, `increment` / `decrement` (classe), `findOrCreate`, `updateOrCreate` et
+  `tx:update` / `tx:delete` : un `ORM.op` y leve une erreur.
+- **Valeurs liees verifiees.** Les valeurs de `where` / `orWhere`, les elements de `IN` / `BETWEEN`,
+  `whereBetween`, les curseurs `after` / `before`, les cles de relation et de pivot (`attach` /
+  `detach`) doivent etre une chaine, un booleen ou un nombre fini : une table, `NaN` ou l'infini levent
+  une erreur. Un tableau `IN` avec un trou `nil` leve une erreur. Le montant de `increment` /
+  `decrement` doit etre un nombre fini.
+- **Jointures sur un modele** : avec la selection par defaut, une requete de modele avec jointure
+  selectionne `table.*` (la table du modele) au lieu de `*`. Les colonnes des tables jointes doivent
+  etre listees avec `:select()`.
+- **`whereColumn`** n'accepte que les operateurs de comparaison (`=`, `!=`, `<>`, `>`, `<`, `>=`, `<=`).
+- **`chunk` / `chunkById` respectent `limit()`** (nombre total de lignes parcourues) ; `chunk` part de
+  `offset()`, `chunkById` refuse `offset()`. `paginate` leve une erreur quand la page ferait deborder
+  l'`OFFSET`.
+- **Identifiants** : un nom avec un segment vide (`a..b`, `.a`, `a.`) est refuse (`Invalid SQL identifier`).
+- **Types de champs** : un type inconnu (`"int"`, `"text"`...) leve une erreur des `ORM.model()` au
+  lieu de desactiver la verification du champ. Types acceptes : `string`, `number`, `boolean`, `json`,
+  `auto`, `date`, `datetime`, `timestamp`.
+- **`belongsToMany` exige `foreignKey` et `otherKey`** (en plus de `pivot`) : sans l'un d'eux, la
+  definition leve une erreur (avant, la cle manquante produisait un SQL invalide).
+- **Soft delete et ecritures de classe.** Sur un modele `softDelete`, `update` / `updateWhere`,
+  `increment` / `decrement` et `delete` (le soft delete lui-meme) ajoutent `deleted_at IS NULL` : une
+  ligne deja supprimee n'est plus modifiee, et garde sa date de suppression. Un `where` qui contient
+  `deleted_at` vise les lignes supprimees volontairement, sans filtre ajoute. `restore` vise toujours
+  les lignes supprimees ; `forceDelete` est inchange.
+- **Colonnes gerees refusees dans les donnees.** `create`, `createMany`, `createWith`, `upsert`,
+  `update` / `updateWhere` et `instance:update` levent une erreur si les donnees contiennent
+  `deleted_at` (utilise `delete()` / `restore()`), ou `created_at` / `updated_at` sur un modele
+  `timestamps`, sauf avec la nouvelle option de modele `allowManagedColumns = true` (imports). Les
+  hooks `before*` peuvent toujours les fixer, et l'ORM les remplit toujours. `instance:update` garde
+  maintenant un `updated_at` fixe (par un hook ou avec `allowManagedColumns`), comme `Model.update`,
+  au lieu de l'ecraser.
+- **Ecritures et `refresh()` d'une instance** : elles exigent la valeur de la cle primaire (une instance
+  lue par un `:select()` sans la cle leve une erreur claire au lieu d'envoyer un `UPDATE ... WHERE` invalide).
+- **Migrations par ressource.** `orvex_migrations` gagne une colonne `resource` (ajoutee
+  automatiquement). `rollback()` n'annule que le dernier lot **de la ressource qui l'appelle**, et
+  seulement les migrations qu'elle liste. Les noms de migration sont uniques sur toute la base : un
+  nom deja enregistre par une autre ressource leve une erreur avant toute execution (avant, la
+  migration etait ignoree en silence). Prefixe tes noms avec le nom de ta ressource. Les valeurs
+  `DEFAULT` d'une colonne n'acceptent que des chaines, booleens et nombres finis.
+- **Studio : token verifie.** Un `orvex_studio_token` trop court ou trop peu aleatoire (moins de 32
+  caracteres, moins de 10 caracteres differents ou moins d'environ 128 bits) fait refuser le demarrage
+  (avant, toute chaine de 32 caracteres etait acceptee). Genere-le avec `openssl rand -hex 32`. Sans
+  `/dev/urandom` (Windows), le token doit etre configure.
+- **Studio : valeurs scalaires.** Les ecritures n'acceptent que des chaines, nombres, booleens ou
+  `null` pour les colonnes et la cle primaire ; un objet ou un tableau JSON recoit un `422`.
+- **Drivers personnalises sans `:transaction()`** : les transactions sont refusees (erreur) au lieu de
+  s'executer requete par requete sans atomicite. Pour garder l'ancien comportement :
+  `OrvexAdapter.new(driver, { allowNonAtomicTransactions = true })`.
+- **mysql-async** : une lecture pour laquelle mysql-async retourne `nil` (requete en echec) leve une
+  erreur au lieu de retourner une liste vide.
 
 ### Ajouts
 
@@ -67,6 +125,14 @@ de comportement a verifier avant de mettre a jour sont regroupes dans
 - `Builder:chunkById(size, callback, column?)` : parcours par lots en pagination keyset.
 - `Builder:whereColumn(a, op?, b)` et `Builder:clone()` documentes.
 - `instance:getAttribute(name)`.
+- `ORM.op(operateur, valeur)` / `OrvexBuilder.op` : conditions avec operateur dans une table.
+- `OrvexAdapter.new(driver, opts?)` et son option `allowNonAtomicTransactions`.
+- Option de modele `allowManagedColumns` (voir [Changements cassants](#changements-cassants)).
+- `OrvexORM.op` et `OrvexOpMarker` declares dans `lib/types/orvexorm.d.lua`.
+- `OrvexMigration.migrate(migrations, adapter, resource?)` / `rollback(...)` : nom de ressource
+  explicite (defaut : `GetCurrentResourceName()`).
+- Cache : option `maxRows` de `OrvexCache.new` (defaut 5000, y compris pour le cache global) : un
+  resultat plus grand n'est pas mis en cache.
 - Cache : options `maxEntries` et `sweepInterval` de `OrvexCache.new`, 4e argument `tables` de
   `cache:set`, `cache:purgeExpired()`, champ `maxEntries` de `stats()` / `OrvexORM.cacheStats()`.
 - Studio : convar `orvex_studio_allow` (adresses, plages IPv4 CIDR, `*`), conseil de tunnel SSH
@@ -124,6 +190,31 @@ de comportement a verifier avant de mettre a jour sont regroupes dans
 - `ORM.version` est lu dans le `fxmanifest.lua` d'orvexorm.
 - Studio : la limite de requetes passe avant les autres controles, et les refus (limite, verrouillage)
   sont journalises une fois par fenetre au lieu d'une fois par requete.
+- `createMany` avec des lignes aux jeux de cles differents fait un `INSERT` par jeu de cles, dans une
+  seule transaction.
+- Une colonne `json` au contenu invalide est lue comme la chaine brute, avec un avertissement qui nomme
+  le champ (avant, chaque lecture de la ligne levait une erreur).
+- Cache : l'invalidation reconnait les noms qualifies ou entre backticks (`` `users` ``, `db.users`) ;
+  une lecture avec une liste de tables separees par des virgules (`FROM a, b`) est invalidee par toute
+  ecriture ; les parametres flottants sont gardes sans perte dans la cle.
+- mysql-async : les requetes `WITH`, `DESC` et `(SELECT ...)` entre parentheses passent par `fetchAll`
+  (lectures).
+- Migrations : l'ecriture et la suppression des lignes de `orvex_migrations` sont verifiees (une
+  migration appliquee mais non enregistree leve une erreur).
+- Logger : les caracteres de controle et les codes couleur FiveM `^0`-`^9` des donnees journalisees
+  sont echappes.
+- Studio : sous l'URL (qui contient le token), la console avertit qu'elle peut etre recopiee dans
+  txAdmin ou des fichiers de log, et qu'il faut arreter le Studio apres usage.
+- Transactions non atomiques (`allowNonAtomicTransactions`) : quand une requete echoue apres
+  d'autres deja appliquees, `adapter:transaction()` le signale (2e valeur de retour) et la
+  transaction invalide quand meme le cache des tables touchees (avant, le cache pouvait servir des
+  lignes perimees).
+- `createMany` avec plusieurs jeux de cles invalide le cache via sa transaction, une fois validee.
+- Studio : la console rappelle que la liste d'autorisation et le verrouillage utilisent l'adresse TCP
+  (derriere un reverse proxy sur la meme machine, tous les clients sont `127.0.0.1`). Sans
+  `/dev/urandom`, le nonce CSP utilise `math.random` et un avertissement s'affiche.
+- CI : une release n'est publiee que pour un tag pointant sur un commit de `main` ; le deploiement de
+  la documentation ne part que de `main`, et seul le job de deploiement a les droits Pages.
 
 ### Corrections
 
@@ -135,6 +226,19 @@ de comportement a verifier avant de mettre a jour sont regroupes dans
   - Migrations : les valeurs `DEFAULT` et `ENUM` n'echappaient pas les backslashes ; une valeur
     finissant par `\'` sortait du litteral SQL.
   - Studio : encodeur JSON invalide sur les caracteres de controle et `NaN`.
+  - Une table envoyee par un client a la place d'une valeur (`{ "LIKE", "%" }`, `{ ">", 0 }`) etait lue
+    comme un operateur : `User.find({ identifier = payload })` pouvait renvoyer n'importe quelle ligne.
+    Une table liee en parametre pouvait aussi etre developpee par le driver.
+  - Une requete de modele avec jointure pouvait recevoir l'`id` de la table jointe : les ecritures de
+    l'instance visaient une autre ligne.
+  - Studio : les ecritures acceptaient des objets et tableaux JSON comme valeurs.
+  - Studio : quand les tables de verrouillage atteignaient 2048 adresses, elles etaient videes d'un
+    coup (levant les verrouillages en cours) ; les entrees expirees puis les plus anciennes sont
+    maintenant evincees en premier.
+  - Logger : une valeur journalisee pouvait injecter des sequences de controle ou des couleurs dans la
+    console.
+  - Migrations : un `DEFAULT` table (avec `__tostring`), `NaN` ou infini etait insere tel quel dans le DDL.
+  - CI : les sujets de commit etaient developpes par le shell dans les notes de release.
 - **SQL et requetes**
   - `orWhere` n'etait pas groupe : il contournait le filtre du soft delete et la correlation de
     `whereHas`.
@@ -150,20 +254,42 @@ de comportement a verifier avant de mettre a jour sont regroupes dans
   - `offset()` sans `limit()`, et `pluck()` sur une colonne qualifiee, generaient un SQL invalide.
   - `restore()` etait duplique et generait un SQL invalide avec un `where` vide.
   - `instance:update()` de la cle primaire laissait l'ancienne valeur dans le `WHERE` suivant.
+  - `createMany` avec des lignes aux cles differentes perdait les colonnes absentes de la premiere ligne.
+  - `whereColumn` avec `IN`, `BETWEEN` ou `IS` generait un SQL invalide.
+  - Un tableau `IN` avec un trou `nil` decalait tous les parametres suivants.
+  - `chunk` / `chunkById` ignoraient `limit()` ; `paginate` avec une page enorme donnait un `OFFSET`
+    negatif.
+  - Un identifiant avec un segment vide (`a..b`) generait des backticks vides.
+  - Un type de champ inconnu desactivait la validation du champ en silence.
 - **Transactions et drivers**
   - Les ecritures faites par `OrvexORM.transaction`, `raw` et `rawExec` n'invalidaient pas le cache.
   - La transaction mysql-async envoyait `BEGIN` / `COMMIT` sur des connexions differentes du pool :
     elle n'etait pas atomique et son echec ne pouvait pas etre detecte.
+  - Un driver sans `:transaction()` executait les transactions sans atomicite, sans avertissement.
+  - mysql-async : `WITH`, `DESC` et `(SELECT ...)` etaient envoyes comme des ecritures ; une lecture en
+    echec etait prise pour un resultat vide (et mise en cache).
+- **Studio**
+  - Les ecritures (ajout, modification, suppression) ne fonctionnaient pas sur un vrai FXServer : le
+    corps etait lu dans `req.body`, qui n'existe pas. Il est maintenant lu via `req.setDataHandler`,
+    apres la verification du token, et limite a 1 Mio.
 - **Migrations**
   - `SchemaBuilder:table()` ecrasait les appels precedents et ignorait index et cles etrangeres.
   - `Model.sync()` generait un DDL invalide quand la cle primaire n'etait pas declaree.
   - Une migration en echec etait enregistree comme appliquee.
+  - `rollback()` annulait le dernier lot de n'importe quelle ressource ; une migration d'une ressource
+    portant le meme nom qu'une migration d'une autre ressource etait ignoree en silence.
+  - L'echec de l'ecriture d'une ligne de suivi passait inapercu.
 - **Cache**
   - Collisions de cles : une requete pouvait recevoir les lignes en cache d'une autre
     (`{"x:y","z"}` et `{"x","y:z"}`, ou `1` et `"1"`).
   - `invalidateTable` parcourait tout le cache a chaque ecriture et vidait aussi les tables au nom
     proche (`users` vidait `users_logs`).
   - Le cache n'avait pas de taille maximale et ne purgeait pas les entrees expirees.
+  - Une ecriture sur `` `users` `` ou `db.users` n'invalidait pas les lectures de `users` ; une lecture
+    `FROM a, b` n'etait pas invalidee par une ecriture sur `b`.
+  - Deux flottants proches (au-dela de 14 chiffres significatifs) partageaient une entree.
+  - Un resultat de taille illimitee pouvait occuper le cache.
+- **JSON** : une colonne `json` invalide en base rendait sa ligne illisible.
 - **Hooks** : les ecritures de classe (`update`, `delete`, `upsert`, `createMany`) ne declenchaient
   aucun hook.
 - **Performance** : `find` sans `LIMIT 1`, eager loading `belongsToMany` en N+1, `createWith` en une
@@ -190,6 +316,24 @@ de comportement a verifier avant de mettre a jour sont regroupes dans
 - Le cache est propre a chaque ressource : une ecriture d'une autre ressource ne l'invalide pas.
 - `createWith` n'est pas entierement atomique : le parent et les lignes `belongsToMany` sont crees
   avant la transaction des enfants et retires par des `DELETE` de compensation en cas d'echec.
+- Deux ressources qui lancent `migrate()` au meme instant peuvent partager un numero de lot (sans
+  consequence : `rollback()` ne touche que les lignes de la ressource appelante).
+- Studio : la liste d'autorisation et le verrouillage utilisent l'adresse TCP du pair ; derriere un
+  reverse proxy sur la meme machine, tous les clients sont `127.0.0.1`. Sans `/dev/urandom`
+  (Windows), le nonce CSP est plus faible (le token, lui, doit etre configure).
+- Studio : l'URL affichee dans la console contient le token ; la console peut etre recopiee dans
+  txAdmin ou des fichiers de log.
+- Un modele avec son propre cache (`opts.cache`) qui joint une autre table range le resultat dans son
+  cache : une ecriture faite via le modele de la table jointe ne le purge pas (voir
+  [Un cache par modele](docs/docs/guides/cache.md#un-cache-par-modele)).
+- `findOrCreate` / `updateOrCreate` ne voient pas les lignes supprimees en douceur : une ligne
+  supprimee qui correspond donne une nouvelle ligne. Pose un index unique sur les colonnes du `where`.
+- `createWith` traite toute cle portant le nom d'une relation comme une ecriture imbriquee : ne lui
+  passe jamais une table venue d'un client sans la filtrer.
+- Les transactions non atomiques (`allowNonAtomicTransactions`) gardent en base les requetes passees
+  avant l'echec (seul le cache est invalide).
+- CI : luacheck est installe via `luarocks install` sans verification d'empreinte (la version est
+  epinglee, pas son contenu).
 
 ## [1.2.1]
 

@@ -81,12 +81,12 @@ For more control, you can use aggregations in the Query Builder:
 -- Count rich players who aren't banned
 local count = User.query()
     :where("money", ">", 10000)
-    :where({ status = { "!=", "banned" } })
+    :where({ status = OrvexORM.op("!=", "banned") })
     :count()
 
 -- Sum of money for emergency workers
 local total = User.query()
-    :where({ job = { "IN", { "police", "medic", "firefighter" } } })
+    :where({ job = OrvexORM.op("IN", { "police", "medic", "firefighter" }) })
     :sum("money")
 
 -- Average money per job (with groupBy)

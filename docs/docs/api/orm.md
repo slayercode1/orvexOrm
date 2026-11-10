@@ -36,7 +36,8 @@ Cree un nouveau modele lie a une table MySQL.
 |---|---|---|---|
 | `primaryKey` | `string` | `"id"` | Nom de la colonne cle primaire |
 | `timestamps` | `boolean` | `false` | Remplit `created_at` / `updated_at` ; ces colonnes sont acceptees meme si elles ne sont pas dans `fields` |
-| `softDelete` | `boolean` | `false` | `delete()` remplit `deleted_at` au lieu de supprimer ; les lectures excluent ces lignes |
+| `softDelete` | `boolean` | `false` | `delete()` remplit `deleted_at` au lieu de supprimer ; les lectures et les ecritures de classe excluent ces lignes |
+| `allowManagedColumns` | `boolean` | `false` | Autorise `created_at` / `updated_at` dans les donnees de `create`, `createMany`, `upsert`, `update` (sinon erreur). `deleted_at` reste toujours refuse |
 | `hooks` | `table` | `nil` | Un hook par evenement : `{ beforeCreate = fn, afterBulkUpdate = fn, ... }` (voir [Hooks](/docs/api/model#hooks-lifecycle)) |
 | `scopes` | `table` | `nil` | Filtres reutilisables : `{ rich = function(b) b:where(...) end }`, appelables comme `User.rich()` |
 | `relations` | `function` | `nil` | `function(M) M.hasMany(...) end`, executee par `Model.applyRelations()` |
@@ -55,6 +56,8 @@ Cree un nouveau modele lie a une table MySQL.
 | `"datetime"` | Date et heure (`"2024-03-15 14:30:00"`) |
 | `"timestamp"` | Horodatage (`"2024-03-15 14:30:00"`) |
 | `"auto"` | Detection automatique (table → JSON, JSON string → table) |
+
+Un autre type (une faute de frappe comme `"int"` ou `"text"`) leve une erreur des la definition du modele : `Field 'x': unknown type 'int' (supported: string, number, boolean, json, auto, date, datetime, timestamp)`.
 
 ### Retour
 
@@ -114,7 +117,7 @@ Apres un commit reussi, le cache global est invalide pour chaque table ecrite.
 
 ## `ORM.enableCache(opts?)`
 
-Active le cache global avec un TTL optionnel. Le cache global garde au plus **1000 entrees** ; au-dela, les moins recemment lues sont evincees (LRU). Pour une autre limite, donne a un modele son propre cache (`opts.cache`).
+Active le cache global avec un TTL optionnel. Le cache global garde au plus **1000 entrees** ; au-dela, les moins recemment lues sont evincees (LRU). Un resultat de plus de **5000 lignes** n'est pas mis en cache. Pour d'autres limites (`maxEntries`, `maxRows`), donne a un modele son propre cache (`opts.cache`, voir [Cache](/docs/guides/cache#un-cache-par-modele)).
 
 ### Parametres
 
@@ -178,7 +181,7 @@ print(("Cache : %d hits, %d misses (%.0f%%), %d entrees")
 
 ## `ORM.setAdapter(adapter)`
 
-Remplace l'adaptateur de base de donnees par defaut (utilise par les modeles crees **apres** l'appel, les transactions, `raw`, `rawExec` et les migrations). Un adaptateur se construit avec la classe globale `OrvexAdapter`, disponible dans orvexorm et dans chaque ressource qui utilise `lib/import.lua` :
+Remplace l'adaptateur de base de donnees par defaut (utilise par les modeles crees **apres** l'appel, les transactions, `raw`, `rawExec` et les migrations). Un adaptateur se construit avec la classe globale `OrvexAdapter`, disponible dans orvexorm et dans chaque ressource qui utilise `lib/import.lua` : `OrvexAdapter.new(driver, opts?)`.
 
 ```lua
 local MyDriver = {}
@@ -210,7 +213,15 @@ OrvexORM.setAdapter(OrvexAdapter.new(setmetatable({}, MyDriver)))
 | `driver:scalar(sql, params)` | Oui | requete d'ecriture | `INSERT` : l'id insere ; `UPDATE`/`DELETE` : le nombre de lignes touchees (`number` ou `{ affectedRows = n }`) |
 | `driver:transaction(queries)` | Non | `{ { query, values }, ... }` | `boolean` : `true` si tout a ete applique |
 
-Sans `transaction`, l'adaptateur execute les requetes une par une et **n'est pas atomique** : une requete en echec n'annule pas les precedentes. Les methodes du driver peuvent *yield* (`Citizen.Await`).
+Sans `transaction`, l'adaptateur **refuse** les transactions : `OrvexORM.transaction`, `createMany` avec plusieurs jeux de cles et `createWith` levent une erreur (`this driver has no :transaction(), so a transaction cannot be atomic`). Pour accepter quand meme une execution requete par requete, **non atomique**, active-la explicitement :
+
+```lua
+OrvexORM.setAdapter(OrvexAdapter.new(setmetatable({}, MyDriver), {
+    allowNonAtomicTransactions = true,  -- une requete en echec n'annule pas les precedentes
+}))
+```
+
+Dans ce mode, un echec retourne `false`. Si des requetes etaient deja passees avant l'echec (commit partiel), la transaction invalide quand meme le cache de toutes les tables qu'elle touche (tout le cache pour une requete brute dont les tables sont inconnues) : aucune lecture ne peut servir de ligne perimee. La base, elle, garde ces modifications partielles. Les methodes du driver peuvent *yield* (`Citizen.Await`).
 
 Le driver livre est `OrvexMySQLDriver` (`OrvexAdapter.new(OrvexMySQLDriver.new())`), voir [Driver MySQL](/docs/installation#driver-mysql).
 
@@ -250,7 +261,7 @@ OrvexORM.migrations({
 
 ## `ORM.migrate(adapter?)`
 
-Execute toutes les migrations en attente, dans l'ordre. **A la premiere migration en echec**, elle n'est pas enregistree, les suivantes ne sont pas lancees, et une erreur est levee : `[OrvexORM] Migration of migration '<nom>' failed (N migration(s) applied before it): <erreur du driver>`. Une requete pour laquelle le driver retourne `nil` compte comme un echec.
+Execute toutes les migrations en attente, dans l'ordre, dans un nouveau lot enregistre au nom de la ressource qui appelle (`GetCurrentResourceName()`). Le nom d'une migration est **unique sur toute la base** : un nom deja enregistre par une autre ressource leve une erreur avant toute execution. Prefixe donc tes noms avec le nom de ta ressource (`"garage_001_create_vehicles"`). **A la premiere migration en echec**, elle n'est pas enregistree, les suivantes ne sont pas lancees, et une erreur est levee : `[OrvexORM] Migration of migration '<nom>' failed (N migration(s) applied before it): <erreur du driver>`. Une requete pour laquelle le driver retourne `nil` compte comme un echec. Une migration appliquee dont la ligne de suivi ne peut pas etre ecrite leve aussi une erreur.
 
 ### Parametres
 
@@ -283,7 +294,7 @@ MySQL valide chaque `CREATE` / `ALTER` immediatement : si une migration contient
 
 ## `ORM.rollback(adapter?)`
 
-Annule le dernier lot de migrations (la plus recente d'abord). Si un `down` echoue, sa migration reste enregistree et une erreur est levee, comme pour `migrate()`.
+Annule le dernier lot de migrations **de la ressource qui appelle** (la plus recente d'abord). Seules les migrations que cette ressource a enregistrees (`OrvexORM.migrations`) et appliquees sont annulees : `rollback()` ne touche jamais les migrations d'une autre ressource. Si un `down` echoue, sa migration reste enregistree et une erreur est levee, comme pour `migrate()`.
 
 ### Parametres
 

@@ -209,6 +209,8 @@ User.belongsToMany("roles", Role, {
 })
 ```
 
+`pivot`, `foreignKey` et `otherKey` sont obligatoires : sans l'un d'eux, la definition leve une erreur. Les cles d'une relation (et celles passees a `attach` / `detach`) doivent etre des chaines, des booleens ou des nombres finis ; une autre valeur leve une erreur au lieu de changer la condition de la requete.
+
 ### Lire les roles d'un joueur
 
 ```lua
@@ -419,6 +421,10 @@ mais en mieux :
 Le parent et les lignes liees d'un `belongsToMany` (creees avec `create`) declenchent tous leurs hooks. Les enfants `hasOne` / `hasMany` inseres en lot declenchent `beforeCreate` (une fois par ligne, cle etrangere deja remplie) puis `afterBulkCreate` (une fois par relation, apres la transaction), mais pas `afterCreate`. Les cles `belongsTo` dans les donnees sont ignorees.
 
 Le parent et les lignes `belongsToMany` sont ecrits **avant** la transaction : ce n'est pas une ecriture entierement atomique (voir [`Model.createWith`](/docs/api/model#modelcreatewithdata--orvexinstance)).
+
+:::danger Filtre les donnees client
+Toute cle qui porte le nom d'une relation est une ecriture imbriquee. Ne passe jamais une table recue d'un client a `createWith` telle quelle : un champ `roles` ajoute par le client creerait des lignes liees. Construis `data` avec les seuls champs attendus.
+:::
 
 ---
 

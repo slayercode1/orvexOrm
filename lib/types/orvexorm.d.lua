@@ -48,32 +48,54 @@
 ---@field instance OrvexInstance also carries the count in `_count_<relation>`
 ---@field count integer
 
----@alias OrvexWhere table<string, any|OrvexWhereValue> `{ column = value }` or `{ column = { operator, value } }`
+-- ─── Operator markers ──────────────────────────────────────────────
+
+--- Operator condition built by `OrvexORM.op` (alias `OrvexBuilder.op`). Only
+--- markers built on the server are read as operators: a client table shaped
+--- like `{ "LIKE", "%" }` never carries the marker's metatable.
+---@class OrvexOpMarker
+---@field operator OrvexWhereOperator upper-cased
+---@field value any
+
+---@class OrvexORM
+---@field op fun(operator: OrvexWhereOperator, value: any): OrvexOpMarker `{ money = OrvexORM.op(">", 1000) }`; a nil value raises (use whereNull / ORM.op("IS", "NULL"))
+
+--- Table-form where: `{ column = value }` (equality) or
+--- `{ column = ORM.op(operator, value) }`. Values must be strings, booleans or
+--- finite numbers; a plain table (the old `{ operator, value }` form) raises.
+---@alias OrvexWhere table<string, OrvexWhereValue>
+
+--- Where of the class-level writes, findOrCreate and updateOrCreate: equality
+--- only. An ORM.op marker, a table, NaN or infinity raises.
+---@alias OrvexEqualityWhere table<string, string|number|boolean>
 
 -- ─── Model class ───────────────────────────────────────────────────
 -- Write methods return the number of rows the driver reports as affected
 -- (0: nothing matched). Misuse (missing where, invalid data) raises an error
--- located at the caller's line.
+-- located at the caller's line. On a softDelete model, class-level update,
+-- increment / decrement and delete skip rows already deleted (deleted_at IS
+-- NULL) unless the where names deleted_at. Write data may not set deleted_at,
+-- nor created_at / updated_at unless the model sets allowManagedColumns.
 
 ---@class OrvexModel
 ---@field create fun(data: table<string, any>): OrvexInstance
----@field createMany fun(rows: table[]): boolean one multi-row INSERT
----@field createWith fun(data: table<string, any>): OrvexInstance creates the row and its nested hasOne / hasMany / belongsToMany rows
+---@field createMany fun(rows: table[]): boolean one multi-row INSERT (one per key set, in a transaction, when rows have different keys)
+---@field createWith fun(data: table<string, any>): OrvexInstance creates the row and its nested hasOne / hasMany / belongsToMany rows; every relation-named key is a nested write, never pass unfiltered client data
 ---@field upsert fun(data: table<string, any>): boolean INSERT ... ON DUPLICATE KEY UPDATE
 ---@field find fun(where?: OrvexWhere, opts?: OrvexFindOpts): OrvexInstance|nil first matching row (LIMIT 1)
 ---@field findAll fun(where?: OrvexWhere, opts?: OrvexFindOpts): OrvexInstance[]
 ---@field all fun(opts?: OrvexFindOpts): OrvexInstance[]
 ---@field findOrFail fun(where: OrvexWhere, opts?: OrvexFindOpts): OrvexInstance raises when nothing matches
----@field findOrCreate fun(where: table<string, any>, defaults?: table<string, any>): OrvexInstance, boolean instance, created
----@field updateOrCreate fun(where: table<string, any>, data: table<string, any>): OrvexInstance, boolean instance, created
----@field update fun(data: table<string, any>, where: table<string, any>): integer data first; affected rows
----@field updateWhere fun(where: table<string, any>, data: table<string, any>): integer where first (alias of update); affected rows
----@field delete fun(where: table<string, any>): integer soft delete when enabled; affected rows
----@field deleteWhere fun(where: table<string, any>): integer alias of delete; affected rows
----@field forceDelete fun(where: table<string, any>): integer always a real DELETE; affected rows
----@field restore fun(where: table<string, any>): integer requires softDelete; affected rows
----@field increment fun(column: string, amount: number, where: table<string, any>): integer amount required here; affected rows
----@field decrement fun(column: string, amount: number, where: table<string, any>): integer amount required here; affected rows
+---@field findOrCreate fun(where: OrvexEqualityWhere, defaults?: table<string, any>): OrvexInstance, boolean instance, created; where is equality only
+---@field updateOrCreate fun(where: OrvexEqualityWhere, data: table<string, any>): OrvexInstance, boolean instance, created; where is equality only
+---@field update fun(data: table<string, any>, where: OrvexEqualityWhere): integer data first; affected rows
+---@field updateWhere fun(where: OrvexEqualityWhere, data: table<string, any>): integer where first (alias of update); affected rows
+---@field delete fun(where: OrvexEqualityWhere): integer soft delete when enabled; affected rows
+---@field deleteWhere fun(where: OrvexEqualityWhere): integer alias of delete; affected rows
+---@field forceDelete fun(where: OrvexEqualityWhere): integer always a real DELETE; affected rows
+---@field restore fun(where: OrvexEqualityWhere): integer requires softDelete; affected rows
+---@field increment fun(column: string, amount: number, where: OrvexEqualityWhere): integer amount required here (finite number); affected rows
+---@field decrement fun(column: string, amount: number, where: OrvexEqualityWhere): integer amount required here (finite number); affected rows
 ---@field first fun(where?: OrvexWhere): OrvexInstance|nil
 ---@field exists fun(where?: OrvexWhere): boolean
 ---@field pluck fun(column: string, where?: OrvexWhere): any[]
@@ -118,6 +140,7 @@
 ---@field ttl? number seconds, default 60
 ---@field enabled? boolean default true for `OrvexCache.new`
 ---@field maxEntries? integer default 1000; least recently used entries are evicted
+---@field maxRows? integer default 5000; a result with more rows is not cached
 ---@field sweepInterval? number seconds between purges of expired entries, default ttl (min 1)
 
 ---@class OrvexCacheStats
@@ -129,9 +152,10 @@
 
 -- ─── Driver contract ───────────────────────────────────────────────
 
---- What `OrvexAdapter.new(driver)` expects. Every method may yield: call
---- them from a thread (Citizen.CreateThread, event or command handler).
+--- What `OrvexAdapter.new(driver, opts?)` expects. Every method may yield: call
+--- them from a thread (Citizen.CreateThread, event or command handler). In the
+--- non-atomic fallback, a partial commit still invalidates the touched tables' cache.
 ---@class OrvexDriver
 ---@field execute fun(self: OrvexDriver, query: string, params: any[]): table[] rows of a SELECT
 ---@field scalar fun(self: OrvexDriver, query: string, params: any[]): any insert id for INSERT, affected rows (number or { affectedRows = n }) for UPDATE / DELETE
----@field transaction? fun(self: OrvexDriver, queries: OrvexTransactionQuery[]): boolean atomic; without it the adapter runs the queries one by one (NOT atomic)
+---@field transaction? fun(self: OrvexDriver, queries: OrvexTransactionQuery[]): boolean atomic; without it the adapter refuses transactions unless created with `{ allowNonAtomicTransactions = true }` (then one by one, NOT atomic)

@@ -72,6 +72,15 @@ Quand tu chaines plusieurs `:where()`, ils sont relies par **AND** (les deux con
 
 ## Tous les operateurs
 
+Un operateur s'ecrit de deux facons : en 3 arguments (`:where("money", ">", 1000)`), ou dans une table de conditions avec `OrvexORM.op(operateur, valeur)` :
+
+```lua
+User.query():where({ job = "police", money = OrvexORM.op(">", 1000) }):get()
+-- SQL: WHERE `job` = ? AND `money` > ?
+```
+
+Dans une table, une valeur simple est une egalite ; seule une valeur construite par `OrvexORM.op` est lue comme un operateur. Une table ordinaire (`{ money = { ">", 1000 } }`, l'ancienne syntaxe) **leve une erreur**. La meme regle vaut pour `orWhere`, et pour les `where` en table de `find`, `findAll`, `findOrFail`, `first`, `exists`, `count`, `pluck`, des agregations, de `countByRelation` et des scopes.
+
 ### Plus grand / plus petit
 
 ```lua
@@ -84,7 +93,8 @@ Quand tu chaines plusieurs `:where()`, ils sont relies par **AND** (les deux con
 ### Different de
 
 ```lua
-:where({ status = { "!=", "banned" } })
+:where("status", "!=", "banned")
+:where({ status = OrvexORM.op("!=", "banned") })  -- meme condition, forme table
 -- SQL: WHERE status != ?
 ```
 
@@ -92,7 +102,7 @@ Quand tu chaines plusieurs `:where()`, ils sont relies par **AND** (les deux con
 
 ```lua
 -- Tous les jobs qui contiennent "poli"
-:where({ job = { "LIKE", "%poli%" } })
+:where({ job = OrvexORM.op("LIKE", "%poli%") })
 -- SQL: WHERE job LIKE ?
 ```
 
@@ -105,7 +115,7 @@ Le `%` est un joker qui remplace n'importe quel texte :
 
 ```lua
 -- Policiers, medecins ou pompiers
-:where({ job = { "IN", { "police", "medic", "firefighter" } } })
+:where({ job = OrvexORM.op("IN", { "police", "medic", "firefighter" }) })
 -- SQL: WHERE job IN (?, ?, ?)
 ```
 
@@ -113,7 +123,7 @@ Le `%` est un joker qui remplace n'importe quel texte :
 
 ```lua
 -- Joueurs qui ont entre 500$ et 5000$
-:where({ money = { "BETWEEN", { 500, 5000 } } })
+:where({ money = OrvexORM.op("BETWEEN", { 500, 5000 }) })
 -- SQL: WHERE money BETWEEN ? AND ?
 ```
 
@@ -121,11 +131,11 @@ Le `%` est un joker qui remplace n'importe quel texte :
 
 ```lua
 -- Joueurs sans job
-:where({ job = { "IS", "NULL" } })
+:where({ job = OrvexORM.op("IS", "NULL") })   -- ou :whereNull("job")
 -- SQL: WHERE job IS NULL
 
 -- Joueurs avec un job
-:where({ job = { "IS NOT", "NULL" } })
+:where({ job = OrvexORM.op("IS NOT", "NULL") })   -- ou :whereNotNull("job")
 -- SQL: WHERE job IS NOT NULL
 ```
 
@@ -133,7 +143,7 @@ Le `%` est un joker qui remplace n'importe quel texte :
 
 ### Raccourcis pour les filtres courants
 
-Au lieu d'utiliser la syntaxe `{ col = { "OP", val } }`, tu peux utiliser des methodes dediees :
+Au lieu d'utiliser `{ col = OrvexORM.op("OP", val) }`, tu peux utiliser des methodes dediees :
 
 ```lua
 -- whereIn : parmi une liste de valeurs
@@ -151,6 +161,25 @@ User.query():whereNotBetween("money", 0, 100):get()
 -- whereLike : recherche de texte
 User.query():whereLike("name", "%john%"):get()
 ```
+
+---
+
+## Valeurs venues du client
+
+Une valeur de condition (`where`, `orWhere`, elements de `IN` / `BETWEEN`, curseurs `after` / `before`) doit etre une **chaine, un booleen ou un nombre fini**. Une table, `nil`, `NaN` ou l'infini levent une erreur avant que la requete parte.
+
+N'envoie jamais un argument d'event reseau tel quel dans un `where` : un client peut envoyer une table a la place de la chaine attendue. Convertis et verifie d'abord :
+
+```lua
+RegisterNetEvent("garage:spawn", function(plate)
+    local src = source
+    if type(plate) ~= "string" or #plate > 8 then return end  -- refuse tout le reste
+    local vehicle = Vehicle.find({ plate = plate, owner = GetPlayerIdentifier(src, 0) })
+    -- ...
+end)
+```
+
+Un client ne peut pas non plus fabriquer un operateur : un argument decode depuis le reseau peut avoir la forme `{ "LIKE", "%" }`, mais seule une valeur creee par `OrvexORM.op` cote serveur est lue comme un operateur. `User.find({ identifier = payload })` avec une table leve donc une erreur au lieu de devenir `identifier LIKE '%'`.
 
 ---
 
@@ -330,6 +359,8 @@ end
 | `perPage` | `integer` | Nombre d'elements par page (defaut: 15) |
 | `lastPage` | `integer` | Numero de la derniere page |
 
+`page` et `perPage` doivent etre des entiers positifs ; une page si grande que l'`OFFSET` deborderait leve une erreur.
+
 ### Raccourci : `:first()`
 
 Si tu veux juste le **premier** resultat :
@@ -392,6 +423,10 @@ Vehicle.query()
 - **LEFT JOIN** : "Je veux tous les joueurs, avec ou sans vehicule"
 - **INNER JOIN** : "Je veux seulement les joueurs qui ont un vehicule"
 - **RIGHT JOIN** : rarement utilise, prefere LEFT JOIN en inversant les tables
+:::
+
+:::caution Colonnes des tables jointes
+Sur une requete de modele avec une jointure, la selection par defaut est `users.*` (la table du modele), pas `*` : une colonne de meme nom (`id`...) de la table jointe ne peut pas ecraser la cle primaire de l'instance. Pour lire des colonnes de la table jointe, liste-les avec `:select()`, comme dans les exemples ci-dessus.
 :::
 
 ---
@@ -507,6 +542,8 @@ User.query():chunkById(100, function(players, chunkIndex)
 end, "identifier")  -- colonne unique ; "id" par defaut
 ```
 
+Un `:limit(n)` pose sur le builder borne le nombre total de lignes parcourues. `chunkById` refuse `:offset()` (une page keyset ne saute pas de lignes) : filtre plutot avec `:where(colonne, ">", cle)`.
+
 ### `:chunk(size, callback)` — Traiter par lots (OFFSET)
 
 Meme principe avec `LIMIT` / `OFFSET`. Plus simple, mais MySQL relit toutes les lignes precedentes a chaque lot (lent sur une grosse table), et si la callback modifie les lignes de facon qu'elles ne correspondent plus au filtre, des lignes sont **sautees**. Reserve-le aux petites tables en lecture seule.
@@ -519,6 +556,8 @@ User.query():chunk(100, function(players, chunkIndex)
 end)
 ```
 
+Ici aussi, un `:limit(n)` borne le nombre total de lignes parcourues, et le parcours commence a l'`:offset()` du builder.
+
 ---
 
 ## Exemple complet
@@ -528,7 +567,7 @@ Voici un exemple realiste — un systeme de classement des joueurs les plus rich
 ```lua
 -- Top 10 des joueurs les plus riches qui ne sont pas bannis
 local top10 = User.query()
-    :where({ status = { "!=", "banned" } })
+    :where({ status = OrvexORM.op("!=", "banned") })
     :where("money", ">", 0)
     :orderBy("money", "DESC")
     :limit(10)

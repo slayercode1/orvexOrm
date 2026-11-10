@@ -106,6 +106,22 @@ end)
 
 OrvexORM garde une trace des migrations deja appliquees dans une table `orvex_migrations`. Les migrations deja executees ne sont jamais rejouees.
 
+### Plusieurs ressources sur la meme base
+
+`orvex_migrations` est partagee par toutes les ressources qui utilisent la base. Chaque ligne enregistre la **ressource** qui l'a appliquee (colonne `resource`, ajoutee automatiquement a une table creee par une version precedente ; les anciennes lignes restent sans ressource et appartiennent a la ressource qui les liste).
+
+:::caution Prefixe tes noms de migration
+Le nom d'une migration est **unique sur toute la base**. Si deux ressources ont chacune une migration `001_create_users`, la seconde a appeler `migrate()` recoit une erreur avant toute execution :
+
+```
+[OrvexORM] Migration '001_create_users' is already recorded by resource 'garage': migration names are shared by every resource on the database, prefix them with your resource name
+```
+
+Prefixe donc chaque nom avec celui de ta ressource : `"garage_001_create_vehicles"`, `"bank_001_create_accounts"`.
+:::
+
+Deux ressources qui appellent `migrate()` au meme instant peuvent recevoir le meme numero de lot. C'est sans consequence : `rollback()` ne touche que les lignes de la ressource qui l'appelle.
+
 ### Quand une migration echoue
 
 `migrate()` s'arrete a la **premiere** migration en echec et **leve une erreur** :
@@ -146,7 +162,7 @@ CreateThread(function()
 end)
 ```
 
-`rollback()` annule le **dernier lot** de migrations (le dernier `migrate()`), de la plus recente a la plus ancienne. Si un `down` echoue, sa migration **reste enregistree**, les suivantes ne sont pas annulees, et une erreur est levee, comme pour `migrate()`.
+`rollback()` annule le **dernier lot de la ressource qui l'appelle** (son dernier `migrate()`), de la plus recente a la plus ancienne. Seules les migrations que cette ressource enregistre avec `OrvexORM.migrations` sont annulees : les migrations d'une autre ressource ne sont jamais touchees. Si un `down` echoue, sa migration **reste enregistree**, les suivantes ne sont pas annulees, et une erreur est levee, comme pour `migrate()`.
 
 ## Le Schema Builder
 
@@ -355,9 +371,11 @@ end)
 1. OrvexORM cree une table `orvex_migrations` pour suivre les migrations appliquees
 2. Quand tu appelles `OrvexORM.migrate()`, il compare tes migrations avec celles deja appliquees
 3. Les nouvelles migrations sont executees dans l'ordre ; chaque requete de leur `up` est envoyee dans l'ordre d'appel
-4. Une migration n'est enregistree qu'apres le succes de toutes ses requetes ; au premier echec, `migrate()` leve une erreur
-5. Chaque lot de migrations recoit un numero de "batch" (utile pour le rollback)
-6. `OrvexORM.rollback()` annule uniquement le dernier batch
+4. Une migration n'est enregistree qu'apres le succes de toutes ses requetes ; au premier echec, `migrate()` leve une erreur. L'ecriture de la ligne de suivi est verifiee elle aussi : si elle echoue, `migrate()` leve une erreur
+5. Chaque lot de migrations recoit un numero de "batch" et le nom de la ressource (utiles pour le rollback)
+6. `OrvexORM.rollback()` annule uniquement le dernier batch de la ressource qui l'appelle
+
+`OrvexORM.migrate()` et `rollback()` utilisent le nom de la ressource courante (`GetCurrentResourceName()`). Le module bas niveau accepte un nom explicite : `OrvexMigration.migrate(migrations, adapter, resource?)` et `OrvexMigration.rollback(migrations, adapter, resource?)`.
 
 :::caution En production
 Les migrations modifient la structure de ta base de donnees. Fais toujours un **backup** avant d'appliquer des migrations en production. Et teste tes migrations sur un serveur de developpement d'abord !

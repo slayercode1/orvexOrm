@@ -37,6 +37,13 @@ Misuse **raises a Lua error** whose position points at **your** line of code (no
 
 A SQL error reported by the driver is a Lua error too. Use `pcall` to catch them.
 
+### Conditions (`where`)
+
+- In a `{ column = value }` table, every value is an **equality**. An operator is written `OrvexORM.op(operator, value)`: `{ money = OrvexORM.op(">", 100) }`. A plain table (the old `{ money = { ">", 100 } }` syntax) raises an error.
+- `OrvexORM.op` is accepted by `find`, `findAll`, `findOrFail`, `first`, `exists`, `count`, `pluck`, `sum` / `avg` / `min` / `max`, `countByRelation` and the query builder (so scopes too).
+- `update` / `updateWhere`, `delete` / `deleteWhere`, `forceDelete`, `restore`, `increment` / `decrement`, `findOrCreate` and `updateOrCreate` accept equalities only: an `OrvexORM.op` raises an error there.
+- A value must be a string, a boolean or a finite number (no table, `NaN` or infinity). Never pass a client's net-event argument without converting it: see [Values coming from the client](/docs/guides/query-builder#values-coming-from-the-client).
+
 ### Argument order
 
 The API has a few historical irregularities, kept for backward compatibility:
@@ -75,7 +82,7 @@ local player = User.create({ identifier = "license:abc", money = 500 })
 
 ### `Model.find(where?, opts?)` → `OrvexInstance | nil`
 
-Returns the first matching row, or `nil`. The query carries a `LIMIT 1`. `where` accepts operators (`{ money = { ">", 100 } }`); without `where`, returns the first row of the table.
+Returns the first matching row, or `nil`. The query carries a `LIMIT 1`. `where` accepts operators (`{ money = OrvexORM.op(">", 100) }`); without `where`, returns the first row of the table.
 
 | Option | Type | Description |
 |---|---|---|
@@ -141,7 +148,7 @@ User.upsert({ identifier = "license:abc", money = 2000 })
 
 ### `Model.update(data, where)` → `integer`
 
-Updates the rows matching `where` and returns the affected row count. Fires `beforeBulkUpdate(data, where)` then `afterBulkUpdate(data, where, affected)`.
+Updates the rows matching `where` and returns the affected row count. Fires `beforeBulkUpdate(data, where)` then `afterBulkUpdate(data, where, affected)`. With `softDelete`, soft-deleted rows are left alone (`AND deleted_at IS NULL`), unless `where` itself holds `deleted_at`. `data` cannot hold `deleted_at`, nor `created_at` / `updated_at` without `allowManagedColumns` (see [Validation](/docs/guides/validation#columns-managed-by-the-orm)).
 
 ```lua
 local n = User.update({ money = 0 }, { job = "unemployed" })
@@ -156,7 +163,7 @@ The `where` parameter is **required** and must be non-empty, so the whole table 
 
 ### `Model.delete(where)` → `integer`
 
-Deletes the rows matching `where` and returns the affected row count. If soft delete is enabled, marks the rows as deleted (sets `deleted_at`). Fires `beforeBulkDelete(where)` then `afterBulkDelete(where, affected)`.
+Deletes the rows matching `where` and returns the affected row count. If soft delete is enabled, marks the rows as deleted (sets `deleted_at`); a row already deleted keeps its deletion date (`AND deleted_at IS NULL`). Fires `beforeBulkDelete(where)` then `afterBulkDelete(where, affected)`.
 
 ```lua
 User.delete({ job = "unemployed" })
@@ -166,7 +173,7 @@ User.delete({ job = "unemployed" })
 
 ### `Model.createMany(rows)` → `boolean`
 
-Inserts several rows in a single query. Every row is validated; `beforeCreate` fires for each row (on a copy), then `afterBulkCreate(rows)` once. No instance is built.
+Inserts several rows in a single query. When the rows do not all have the same keys, one `INSERT` runs per key set, all in a single transaction (no column is lost). Every row is validated; `beforeCreate` fires for each row (on a copy), then `afterBulkCreate(rows)` once. No instance is built.
 
 ```lua
 User.createMany({
@@ -180,7 +187,7 @@ User.createMany({
 
 ### `Model.findOrCreate(where, defaults?)` → `OrvexInstance, boolean`
 
-Looks up a record, or creates it (with `where` + `defaults`) if it does not exist. Returns the instance and a `created` boolean. It is not atomic: two simultaneous calls can both create the row unless a unique key prevents it.
+Looks up a record, or creates it (with `where` + `defaults`) if it does not exist. Returns the instance and a `created` boolean. `where` accepts equalities only, since it is also the data of the created row. It is not atomic: two simultaneous calls can both create the row unless a unique key prevents it. With `softDelete`, the lookup does not see soft-deleted rows: a matching "deleted" row leads to a **new** row. Put a unique index on the `where` columns so a duplicate raises an error instead of being inserted (the same goes for `updateOrCreate`).
 
 ```lua
 local player, created = User.findOrCreate(
@@ -197,7 +204,7 @@ end
 
 ### `Model.updateOrCreate(where, data)` → `OrvexInstance, boolean`
 
-Updates an existing record (through `instance:update`, so `beforeUpdate`/`afterUpdate`), or creates a new one (`beforeCreate`/`afterCreate`).
+Updates an existing record (through `instance:update`, so `beforeUpdate`/`afterUpdate`), or creates a new one (`beforeCreate`/`afterCreate`). As with `findOrCreate`, the lookup ignores soft-deleted rows: a unique index prevents duplicates.
 
 ```lua
 local player, created = User.updateOrCreate(
@@ -210,7 +217,7 @@ local player, created = User.updateOrCreate(
 
 ### `Model.increment(column, amount, where)` → `integer`
 
-Increments a numeric column, atomically on the MySQL side (`money = money + ?`). `amount` is required. No hook fires.
+Increments a numeric column, atomically on the MySQL side (`money = money + ?`). `amount` is required and must be a finite number (a string, `NaN` or infinity raise an error). With `softDelete`, soft-deleted rows are left alone (as with `decrement`). No hook fires.
 
 ```lua
 User.increment("money", 100, { identifier = "license:abc" })
@@ -317,6 +324,10 @@ User.restore({ identifier = "license:abc" })
 ### `Model.createWith(data)` → `OrvexInstance`
 
 Creates a record with nested relations (nested writes). Relation keys are detected automatically.
+
+:::danger Never raw client data
+**Any** key of `data` named like a relation is treated as a nested write: a client that adds `roles = { { name = "admin" } }` to its table creates related rows. Never pass a table received from a client to `createWith` unfiltered: copy only the fields you expect.
+:::
 
 ```lua
 -- Define the relations
@@ -530,8 +541,8 @@ Defines an N → N relation through a pivot table.
 | Option | Type | Description |
 |---|---|---|
 | `pivot` | `string` | Name of the pivot table **(required)** |
-| `foreignKey` | `string` | Pivot column → this table |
-| `otherKey` | `string` | Pivot column → related table |
+| `foreignKey` | `string` | Pivot column → this table **(required)** |
+| `otherKey` | `string` | Pivot column → related table **(required)** |
 | `localKey` | `string?` | Column on this table (default: primaryKey) |
 
 ```lua
@@ -557,7 +568,9 @@ User.belongsToMany("roles", Role, {
 | `adapter` | `OrvexAdapter` | default | Adapter of this model only |
 | `cache` | `OrvexCache` | global cache | Cache of this model only (see [Cache](/docs/guides/cache#one-cache-per-model)) |
 
-With `timestamps` or `softDelete`, the `created_at`, `updated_at` and `deleted_at` columns are accepted by validation even if you do not declare them in `fields`.
+| `allowManagedColumns` | `boolean` | `false` | Allows `created_at` / `updated_at` in the data of writes (imports) |
+
+With `timestamps` or `softDelete`, the `created_at`, `updated_at` and `deleted_at` columns are accepted by validation even if you do not declare them in `fields`. Your data cannot write them: never `deleted_at`, `created_at` / `updated_at` only with `allowManagedColumns = true`; `before*` hooks always can.
 
 ```lua
 local User = ORM.model("users", { ... }, {
@@ -586,7 +599,7 @@ User.applyRelations()
 
 ## Soft Delete
 
-With `softDelete = true`, deletions mark the row with `deleted_at` instead of removing it.
+With `softDelete = true`, deletions mark the row with `deleted_at` instead of removing it. The class-level writes `update` / `updateWhere`, `increment` / `decrement` and `delete` add `deleted_at IS NULL`: they leave rows already deleted alone (unless the `where` holds `deleted_at`). `restore` still targets the deleted rows, `forceDelete` every row of the `where`.
 
 ```lua
 local User = ORM.model("users", { ... }, { softDelete = true })

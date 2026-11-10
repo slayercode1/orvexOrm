@@ -127,22 +127,24 @@ SELECT * FROM users WHERE job = ?
 
 ### `Model.findAll` avec des operateurs
 
-Tu peux utiliser des operateurs directement dans `find()` et `findAll()`, comme dans le query builder :
+Tu peux utiliser des operateurs directement dans `find()` et `findAll()`, comme dans le query builder, avec `OrvexORM.op(operateur, valeur)` :
 
 ```lua
 -- Policiers avec plus de 1000$
 local richCops = User.findAll({
     job   = "police",
-    money = { ">", 1000 },
+    money = OrvexORM.op(">", 1000),
 })
 
 -- Joueurs actifs avec un job specifique
 local players = User.findAll({
-    job    = { "IN", { "police", "medic", "firefighter" } },
-    money  = { "BETWEEN", { 500, 50000 } },
-    status = { "!=", "banned" },
+    job    = OrvexORM.op("IN", { "police", "medic", "firefighter" }),
+    money  = OrvexORM.op("BETWEEN", { 500, 50000 }),
+    status = OrvexORM.op("!=", "banned"),
 })
 ```
+
+Une table ordinaire comme valeur (l'ancienne syntaxe `{ money = { ">", 1000 } }`) leve une erreur : seule une valeur creee par `OrvexORM.op` est lue comme un operateur, si bien qu'un argument d'event client ne peut pas changer la condition. Voir [Valeurs venues du client](/docs/guides/query-builder#valeurs-venues-du-client).
 
 :::info Difference entre find et findAll
 - `find()` retourne **un seul** resultat (le premier) ou `nil`
@@ -205,7 +207,7 @@ if User.update({ job = "medic" }, { identifier = "license:abc" }) == 0 then
 end
 ```
 
-Le `where` est obligatoire et ne doit pas etre vide : `User.update({ money = 0 }, {})` leve une erreur, pour ne jamais modifier toute la table par accident. Les hooks `beforeBulkUpdate` / `afterBulkUpdate` sont declenches (pas `beforeUpdate`, qui recoit une instance).
+Le `where` est obligatoire et ne doit pas etre vide : `User.update({ money = 0 }, {})` leve une erreur, pour ne jamais modifier toute la table par accident. Il n'accepte que des **egalites** (chaine, booleen ou nombre fini) : un `OrvexORM.op` ou une table y levent une erreur. C'est vrai aussi pour `delete`, `forceDelete`, `restore`, `increment` / `decrement` de classe et pour `tx:update` / `tx:delete` des transactions. Pour une condition avec operateur, utilise `User.query():where(...)` puis ecris chaque instance, ou une requete parametree `OrvexORM.rawExec`. Les hooks `beforeBulkUpdate` / `afterBulkUpdate` sont declenches (pas `beforeUpdate`, qui recoit une instance). Sur un modele `softDelete`, `update`, `increment` / `decrement` et `delete` de classe ne touchent pas les lignes deja supprimees (`deleted_at IS NULL` est ajoute).
 
 **SQL genere :**
 ```sql
@@ -321,7 +323,7 @@ TriggerClientEvent("myresource:playerData", src, player:toTable())
 
 ### `refresh` — Recharger depuis la base
 
-Recharge les colonnes d'une instance depuis la base de donnees. Retourne `false` si la ligne n'existe plus.
+Recharge les colonnes d'une instance depuis la base de donnees. Retourne `false` si la ligne n'existe plus. Comme `update`, `delete`, `forceDelete`, `restore`, `increment` et `decrement` d'instance, il a besoin de la valeur de la cle primaire : une instance chargee par un `:select()` du query builder qui ne la contient pas leve une erreur au lieu de viser une autre ligne.
 
 ```lua
 if player:refresh() then
@@ -365,6 +367,8 @@ local player, created = User.updateOrCreate(
 )
 ```
 
+Le `where` de `findOrCreate` et `updateOrCreate` sert aussi de donnees a la ligne creee : il n'accepte que des egalites (un `OrvexORM.op` leve une erreur). Avec `softDelete`, la recherche ne voit pas les lignes supprimees en douceur : une ligne supprimee qui correspond donne une nouvelle ligne. Pose un **index unique** sur les colonnes du `where` (par exemple `identifier`) pour empecher les doublons.
+
 ### `createMany` — Inserer en masse
 
 ```lua
@@ -375,6 +379,8 @@ User.createMany({
 })
 -- SQL: INSERT INTO users (...) VALUES (...), (...), (...)
 ```
+
+Si les lignes n'ont pas toutes les memes cles, `createMany` fait un `INSERT` par jeu de cles, tous dans une meme transaction : aucune colonne n'est perdue.
 
 ### `increment` / `decrement` — Incrementer / Decrementer
 
@@ -391,7 +397,7 @@ player:increment("kills")
 ```
 
 :::tip Prefere increment a update pour les compteurs
-`player:update({ money = player.money + 100 })` ecrit une valeur calculee a partir d'une lecture : si une autre ecriture a eu lieu entre-temps, elle est ecrasee. `increment` fait le calcul dans MySQL (`money = money + ?`) et ne perd rien. Sur la classe, `amount` est **obligatoire** : `User.increment("money", 100, where)`.
+`player:update({ money = player.money + 100 })` ecrit une valeur calculee a partir d'une lecture : si une autre ecriture a eu lieu entre-temps, elle est ecrasee. `increment` fait le calcul dans MySQL (`money = money + ?`) et ne perd rien. Sur la classe, `amount` est **obligatoire** : `User.increment("money", 100, where)`. Il doit etre un nombre fini : une chaine, `NaN` ou l'infini levent une erreur (convertis un montant venu du client avec `tonumber` et borne-le).
 :::
 
 ---

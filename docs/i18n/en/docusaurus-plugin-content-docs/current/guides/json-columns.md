@@ -48,6 +48,10 @@ print(player.inventory[1].item)     -- "bread"
 
 You don't have to do **anything** — the conversion is transparent.
 
+:::caution Invalid JSON in the database
+If a `"json"` column holds text that is not valid JSON (written by raw SQL or an external tool), reading it does not raise an error: the field keeps the **raw string** (as with `"auto"`) and a warning naming the field (never its content) is logged. Check `type(player.position) == "table"` before using it if the column can be written outside the ORM.
+:::
+
 ## The `"auto"` type (automatic detection)
 
 The `"auto"` type automatically detects whether a value needs to be converted:

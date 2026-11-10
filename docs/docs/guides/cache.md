@@ -17,7 +17,7 @@ OrvexORM.enableCache({ ttl = 60 })
 
 Le **TTL** (Time To Live) est la duree en secondes pendant laquelle une donnee reste en cache avant d'etre consideree comme perimee.
 
-Le cache global garde au plus **1000 entrees**. Quand il est plein, l'entree **la moins recemment lue** est evincee (LRU). Les entrees expirees sont purgees au fil des ecritures, au plus une fois par TTL : la memoire ne grossit pas indefiniment.
+Le cache global garde au plus **1000 entrees**. Quand il est plein, l'entree **la moins recemment lue** est evincee (LRU). Les entrees expirees sont purgees au fil des ecritures, au plus une fois par TTL : la memoire ne grossit pas indefiniment. Un resultat de plus de **5000 lignes** n'est pas mis en cache (option `maxRows` d'un [cache par modele](#un-cache-par-modele)) : une grosse lecture ne peut pas occuper la memoire a elle seule.
 
 :::info Un cache par ressource
 Le cache vit dans la memoire de la ressource. Avec `@orvexorm/lib/import.lua`, chaque ressource a **son propre** cache : `enableCache()` dans la ressource A n'active rien dans la ressource B, et une ecriture faite par B n'invalide pas le cache de A. Si plusieurs ressources (ou un autre script, ou un outil comme HeidiSQL) ecrivent dans les memes tables, garde un TTL court ou laisse le cache desactive pour ces modeles.
@@ -75,7 +75,7 @@ Les operations qui invalident le cache :
 | `find()` / `findAll()` | Non (lecture seule) |
 | `query():get()` | Non (lecture seule) |
 
-L'invalidation est **exacte** : ecrire dans `users` ne vide que les entrees qui lisent `users` (y compris via une jointure ou une sous-requete), pas celles de `users_logs`. Elle ne coute que le nombre d'entrees de cette table.
+L'invalidation est **exacte** : ecrire dans `users` ne vide que les entrees qui lisent `users` (y compris via une jointure ou une sous-requete), pas celles de `users_logs`. Elle ne coute que le nombre d'entrees de cette table. Un nom qualifie ou entre backticks (`` `users` ``, `db.users`, `` `db`.`users` ``) correspond a la meme table `users`. Une lecture avec une liste de tables separees par des virgules (`FROM users, vehicles`) est invalidee par **toute** ecriture, faute de pouvoir lister ses tables a coup sur.
 
 :::caution Ce que le cache ne voit pas
 Une ecriture faite **hors de cette ressource** (autre ressource, autre script SQL, Studio, outil externe) n'invalide rien : les lectures peuvent rester perimees jusqu'au TTL. Les transactions et `raw` n'invalident que le cache **global** : un modele avec son propre `opts.cache` doit etre vide a la main (`Model.flushCache()`).
@@ -154,7 +154,7 @@ local cops2 = User.query()
 
 Les agregations (`count`, `sum`, `avg`, `min`, `max`) sont aussi cachees. Les parcours `chunk` / `chunkById` ne le sont pas (ils evinceraient les entrees utiles).
 
-Une requete dont un parametre est une table, une fonction ou un userdata n'est **pas** mise en cache (sa cle ne serait pas fiable). Les parametres sont distingues par leur type : `1` et `"1"`, ou `true` et `"true"`, donnent des entrees differentes.
+Une requete dont un parametre est une table, une fonction ou un userdata n'est **pas** mise en cache (sa cle ne serait pas fiable). Les parametres sont distingues par leur type : `1` et `"1"`, ou `true` et `"true"`, donnent des entrees differentes. Les nombres a virgule sont gardes sans perte de precision dans la cle : deux flottants differents ne partagent jamais une entree.
 
 ## Un cache par modele
 
@@ -166,6 +166,7 @@ local Config = OrvexORM.model("server_config", { key = "string", value = "json" 
     cache = OrvexCache.new({
         ttl = 300,          -- 5 minutes
         maxEntries = 200,   -- defaut : 1000
+        maxRows = 500,      -- defaut : 5000
     }),
 })
 ```
@@ -174,7 +175,12 @@ local Config = OrvexORM.model("server_config", { key = "string", value = "json" 
 |---|---|---|
 | `ttl` | `60` | Duree de vie en secondes |
 | `maxEntries` | `1000` | Nombre maximal d'entrees (eviction LRU) |
+| `maxRows` | `5000` | Nombre maximal de lignes d'un resultat mis en cache ; un resultat plus grand n'est pas cache |
 | `sweepInterval` | `ttl` (min. 1 s) | Intervalle minimal entre deux purges des entrees expirees |
 | `enabled` | `true` | Un cache cree ainsi est **actif** des sa creation, meme si le cache global est desactive |
 
 Ce cache n'est pas concerne par `OrvexORM.enableCache`, `disableCache`, `flushCache` ni `cacheStats`. Utilise ses methodes : `cache:setEnabled(bool)`, `cache:flush()`, `cache:stats()`, `cache:purgeExpired()` (retourne le nombre d'entrees supprimees), ou `Model.flushCache()`.
+
+:::warning Jointures et caches separes
+Une ecriture n'invalide que le cache **du modele qui ecrit**. Si le modele A a son propre cache et qu'une de ses requetes joint la table B (`A.query():join("b", ...)`, `whereHas`), le resultat est range dans le cache de A : une ecriture faite via le modele B (ou son cache) ne le purge pas, et A peut servir des lignes de B perimees jusqu'a l'expiration du `ttl`. Garde les modeles lies sur le meme cache (le cache global par defaut), ou appelle `A.flushCache()` apres avoir ecrit dans B.
+:::

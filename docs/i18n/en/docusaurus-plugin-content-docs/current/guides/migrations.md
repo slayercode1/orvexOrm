@@ -106,6 +106,22 @@ end)
 
 OrvexORM keeps track of already applied migrations in an `orvex_migrations` table. Previously executed migrations are never replayed.
 
+### Several resources on the same database
+
+`orvex_migrations` is shared by every resource using the database. Each row records the **resource** that applied it (`resource` column, added automatically to a table created by an earlier version; older rows have no resource and belong to the resource that lists them).
+
+:::caution Prefix your migration names
+A migration name is **unique across the whole database**. If two resources each have a `001_create_users` migration, the second one to call `migrate()` gets an error before anything runs:
+
+```
+[OrvexORM] Migration '001_create_users' is already recorded by resource 'garage': migration names are shared by every resource on the database, prefix them with your resource name
+```
+
+So prefix every name with your resource's: `"garage_001_create_vehicles"`, `"bank_001_create_accounts"`.
+:::
+
+Two resources calling `migrate()` at the same instant may get the same batch number. This is harmless: `rollback()` only touches the rows of the resource that calls it.
+
 ### When a migration fails
 
 `migrate()` stops at the **first** failing migration and **raises an error**:
@@ -146,7 +162,7 @@ CreateThread(function()
 end)
 ```
 
-`rollback()` reverts the **last batch** of migrations (the last `migrate()` call), newest first. If a `down` fails, its migration **stays recorded**, the next ones are not rolled back, and an error is raised, as with `migrate()`.
+`rollback()` reverts the **last batch of the resource that calls it** (its last `migrate()` call), newest first. Only the migrations this resource registers with `OrvexORM.migrations` are rolled back: another resource's migrations are never touched. If a `down` fails, its migration **stays recorded**, the next ones are not rolled back, and an error is raised, as with `migrate()`.
 
 ## The Schema Builder
 
@@ -355,9 +371,11 @@ end)
 1. OrvexORM creates an `orvex_migrations` table to track applied migrations
 2. When you call `OrvexORM.migrate()`, it compares your migrations with those already applied
 3. New migrations are executed in order; the statements of each `up` are sent in call order
-4. A migration is only recorded once all its statements succeeded; on the first failure, `migrate()` raises an error
-5. Each batch of migrations receives a "batch" number (useful for rollback)
-6. `OrvexORM.rollback()` only reverts the last batch
+4. A migration is only recorded once all its statements succeeded; on the first failure, `migrate()` raises an error. Writing the tracking row is checked too: if it fails, `migrate()` raises an error
+5. Each batch of migrations receives a "batch" number and the resource name (useful for rollback)
+6. `OrvexORM.rollback()` only reverts the last batch of the resource that calls it
+
+`OrvexORM.migrate()` and `rollback()` use the current resource's name (`GetCurrentResourceName()`). The low-level module accepts an explicit name: `OrvexMigration.migrate(migrations, adapter, resource?)` and `OrvexMigration.rollback(migrations, adapter, resource?)`.
 
 :::caution In production
 Migrations modify your database structure. Always make a **backup** before applying migrations in production. And test your migrations on a development server first!

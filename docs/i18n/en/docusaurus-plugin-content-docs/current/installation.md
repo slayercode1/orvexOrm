@@ -70,6 +70,7 @@ Good to know:
 - Reads go through `MySQL.query` / `executeSync` (text protocol), not `MySQL.prepare`, which flattens single-row results and reads a table parameter as a batch.
 - In `oxmysql_global` mode, a SQL error raises a Lua error (the `.await` form is used). Before, the thread could hang.
 - **mysql-async 3.3 or later** is required for transactions: OrvexORM uses its native transaction (`MySQL.Async.transaction`), the only atomic way under mysql-async. On an older version, `commit()` raises `atomic transactions need mysql-async >= 3.3` and sends nothing.
+- Under mysql-async, queries starting with `SELECT`, `SHOW`, `DESCRIBE` / `DESC`, `EXPLAIN` or `WITH` (including a parenthesised `(SELECT ...) UNION (SELECT ...)`) go through `fetchAll` and return rows. A read for which mysql-async returns nothing (`nil`, the query failed) raises an error instead of being taken for an empty result (and cached as such).
 - Under mysql-async, a SQL error outside a transaction may never call the callback back (a mysql-async limitation): the thread then waits forever. Prefer oxmysql.
 - Every call **waits** for the database: see [Async and threads](/docs/getting-started#async-and-threads).
 

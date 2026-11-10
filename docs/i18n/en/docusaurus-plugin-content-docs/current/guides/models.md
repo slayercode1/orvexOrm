@@ -140,11 +140,13 @@ local Inventory = OrvexORM.model("inventories", {
 
 ## Reserved column names
 
-Column and table names are always wrapped in backticks in the generated SQL: a `group`, `key`, `order` or `rank` column (like in the *Players* example above) works without any precaution. Names may only contain letters, digits, `_` and `.`.
+Column and table names are always wrapped in backticks in the generated SQL: a `group`, `key`, `order` or `rank` column (like in the *Players* example above) works without any precaution. Names may only contain letters, digits, `_` and `.`, with no empty segment (`a..b`, `.a` and `a.` are refused).
 
 ## What the schema controls
 
-The schema (`fields`) is not just a hint: a write with a key missing from the schema is **rejected** (`Unknown field 'x'`). Declare every column you write. The only exceptions: `created_at` / `updated_at` with `timestamps = true` and `deleted_at` with `softDelete = true`, which the ORM manages. See [Validation](/docs/guides/validation#unknown-columns).
+The schema (`fields`) is not just a hint: a write with a key missing from the schema is **rejected** (`Unknown field 'x'`). Declare every column you write. The only exceptions: `created_at` / `updated_at` with `timestamps = true` and `deleted_at` with `softDelete = true`, which the ORM manages. Your data cannot write them: never `deleted_at` (use `delete()` / `restore()`), `created_at` / `updated_at` only with `allowManagedColumns = true`. See [Validation](/docs/guides/validation#unknown-columns).
+
+Every type must be one of `string`, `number`, `boolean`, `json`, `auto`, `date`, `datetime`, `timestamp`. An unknown type (a typo such as `"int"` or `"text"`) raises an error from `OrvexORM.model(...)` on, instead of disabling the check for that field.
 
 ## All options
 
@@ -153,6 +155,7 @@ The schema (`fields`) is not just a hint: a write with a key missing from the sc
 | `primaryKey` | `"id"` | Column that identifies a row |
 | `timestamps` | `false` | Fills `created_at` / `updated_at` |
 | `softDelete` | `false` | `delete()` fills `deleted_at` instead of deleting |
+| `allowManagedColumns` | `false` | Lets your data set `created_at` / `updated_at` (imports) |
 | `hooks` | `nil` | One hook per event (see [Hooks](/docs/api/model#hooks-lifecycle)) |
 | `scopes` | `nil` | Reusable filters, callable as methods |
 | `relations` | `nil` | Callback declaring the relations, run by `applyRelations()` |

@@ -127,22 +127,24 @@ SELECT * FROM users WHERE job = ?
 
 ### `Model.findAll` with operators
 
-You can use operators directly in `find()` and `findAll()`, as in the query builder:
+You can use operators directly in `find()` and `findAll()`, as in the query builder, with `OrvexORM.op(operator, value)`:
 
 ```lua
 -- Officers with more than 1000$
 local richCops = User.findAll({
     job   = "police",
-    money = { ">", 1000 },
+    money = OrvexORM.op(">", 1000),
 })
 
 -- Active players with a specific job
 local players = User.findAll({
-    job    = { "IN", { "police", "medic", "firefighter" } },
-    money  = { "BETWEEN", { 500, 50000 } },
-    status = { "!=", "banned" },
+    job    = OrvexORM.op("IN", { "police", "medic", "firefighter" }),
+    money  = OrvexORM.op("BETWEEN", { 500, 50000 }),
+    status = OrvexORM.op("!=", "banned"),
 })
 ```
+
+A plain table as a value (the old `{ money = { ">", 1000 } }` syntax) raises an error: only a value created by `OrvexORM.op` is read as an operator, so a client's net-event argument cannot change the condition. See [Values coming from the client](/docs/guides/query-builder#values-coming-from-the-client).
 
 :::info Difference between find and findAll
 - `find()` returns **a single** result (the first) or `nil`
@@ -205,7 +207,7 @@ if User.update({ job = "medic" }, { identifier = "license:abc" }) == 0 then
 end
 ```
 
-The `where` is required and must not be empty: `User.update({ money = 0 }, {})` raises an error, so the whole table is never modified by accident. The `beforeBulkUpdate` / `afterBulkUpdate` hooks fire (not `beforeUpdate`, which receives an instance).
+The `where` is required and must not be empty: `User.update({ money = 0 }, {})` raises an error, so the whole table is never modified by accident. It accepts **equalities** only (string, boolean or finite number): an `OrvexORM.op` or a table raises an error there. The same goes for class-level `delete`, `forceDelete`, `restore`, `increment` / `decrement` and for the transactions' `tx:update` / `tx:delete`. For a condition with an operator, use `User.query():where(...)` and write each instance, or a parameterized `OrvexORM.rawExec` query. The `beforeBulkUpdate` / `afterBulkUpdate` hooks fire (not `beforeUpdate`, which receives an instance). On a `softDelete` model, class-level `update`, `increment` / `decrement` and `delete` leave rows already deleted alone (`deleted_at IS NULL` is added).
 
 **Generated SQL:**
 ```sql
@@ -321,7 +323,7 @@ TriggerClientEvent("myresource:playerData", src, player:toTable())
 
 ### `refresh` — Reload from the database
 
-Reloads an instance's columns from the database. Returns `false` if the row no longer exists.
+Reloads an instance's columns from the database. Returns `false` if the row no longer exists. Like the instance's `update`, `delete`, `forceDelete`, `restore`, `increment` and `decrement`, it needs the primary key value: an instance loaded by a query builder `:select()` that does not include it raises an error instead of targeting another row.
 
 ```lua
 if player:refresh() then
@@ -365,6 +367,8 @@ local player, created = User.updateOrCreate(
 )
 ```
 
+The `where` of `findOrCreate` and `updateOrCreate` is also the data of the created row: it accepts equalities only (an `OrvexORM.op` raises an error). With `softDelete`, the lookup does not see soft-deleted rows: a matching deleted row leads to a new row. Put a **unique index** on the `where` columns (for example `identifier`) to prevent duplicates.
+
 ### `createMany` — Bulk insert
 
 ```lua
@@ -375,6 +379,8 @@ User.createMany({
 })
 -- SQL: INSERT INTO users (...) VALUES (...), (...), (...)
 ```
+
+When the rows do not all have the same keys, `createMany` runs one `INSERT` per key set, all in a single transaction: no column is lost.
 
 ### `increment` / `decrement` — Increment / Decrement
 
@@ -391,7 +397,7 @@ player:increment("kills")
 ```
 
 :::tip Prefer increment over update for counters
-`player:update({ money = player.money + 100 })` writes a value computed from a read: if another write happened in between, it is overwritten. `increment` does the math inside MySQL (`money = money + ?`) and loses nothing. On the class, `amount` is **required**: `User.increment("money", 100, where)`.
+`player:update({ money = player.money + 100 })` writes a value computed from a read: if another write happened in between, it is overwritten. `increment` does the math inside MySQL (`money = money + ?`) and loses nothing. On the class, `amount` is **required**: `User.increment("money", 100, where)`. It must be a finite number: a string, `NaN` or infinity raise an error (convert an amount coming from the client with `tonumber` and bound it).
 :::
 
 ---

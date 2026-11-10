@@ -11,8 +11,8 @@ local builder = User.query()
 ```
 
 :::info Identifiers and values
-- **Values** always go through `?` parameters: never concatenated into the SQL.
-- Column and table **names** are validated (letters, digits, `_` and `.` only, otherwise `Invalid SQL identifier`) then wrapped in backticks: `` `group` ``, `` `users`.`money` ``. MySQL reserved words (`group`, `key`, `order`, `rank`...) can therefore be used as column names.
+- **Values** always go through `?` parameters: never concatenated into the SQL. A condition value (including `IN` / `BETWEEN` elements and `after` / `before` cursors) must be a string, a boolean or a finite number: a table, `NaN` or infinity raise an error. See [Values coming from the client](/docs/guides/query-builder#values-coming-from-the-client).
+- Column and table **names** are validated (letters, digits, `_` and `.` only, with no empty segment: `a..b`, `.a` or `a.` are refused; otherwise `Invalid SQL identifier`) then wrapped in backticks: `` `group` ``, `` `users`.`money` ``. MySQL reserved words (`group`, `key`, `order`, `rank`...) can therefore be used as column names.
 - Operators are limited to `=`, `!=`, `<>`, `>`, `<`, `>=`, `<=`, `LIKE`, `NOT LIKE`, `IN`, `NOT IN`, `BETWEEN`, `IS`, `IS NOT`.
 - `:whereRaw()`, `:having()`, `:whereExists()`, `:whereInSub()` and `:whereNotInSub()` are inserted **as is**: never put player data in them, pass it as parameters. `:whereIn()` / `:whereNotIn()` only accept an array, always bound as parameters: a string (for example a malformed client event payload) raises an error instead of being inserted as a subquery.
 
@@ -43,15 +43,19 @@ Adds a WHERE condition (joined with AND).
 :where("id", "IN", { 1, 2, 3 })
 :where("money", "BETWEEN", { 500, 5000 })
 
--- 4. Operator inside the table
-:where({ money = { ">", 1000 } })
-:where({ job = { "LIKE", "%poli%" } })
-:where({ id = { "IN", { 1, 2, 3 } } })
-:where({ money = { "BETWEEN", { 500, 5000 } } })
-:where({ status = { "!=", "banned" } })
-:where({ job = { "IS", "NULL" } })
-:where({ job = { "IS NOT", "NULL" } })
+-- 4. Operator inside the table, with OrvexORM.op(operator, value)
+:where({ money = OrvexORM.op(">", 1000) })
+:where({ job = OrvexORM.op("LIKE", "%poli%") })
+:where({ id = OrvexORM.op("IN", { 1, 2, 3 }) })
+:where({ money = OrvexORM.op("BETWEEN", { 500, 5000 }) })
+:where({ status = OrvexORM.op("!=", "banned") })
+:where({ job = OrvexORM.op("IS", "NULL") })
+:where({ job = OrvexORM.op("IS NOT", "NULL") })
 ```
+
+:::caution No plain table as a value
+In the table form, only a value created by `OrvexORM.op` (alias `OrvexBuilder.op`) is read as an operator. A plain table, such as the old `{ money = { ">", 1000 } }` syntax, raises an error (`a plain table is not a value; build operator conditions with ORM.op(operator, value)`). A client therefore cannot turn an equality into `LIKE '%'` by sending `{ "LIKE", "%" }` instead of a string.
+:::
 
 :::tip 2-argument shortcut
 `:where("job", "police")` is equivalent to `:where({ job = "police" })`. It is shorter when you only have one condition.
@@ -84,7 +88,7 @@ Your conditions are joined in the order you add them, and MySQL evaluates `AND` 
 
 ### `:whereColumn(first, operator?, second)`
 
-Compares two columns (no parameter).
+Compares two columns (no parameter). Only comparison operators are accepted: `=`, `!=`, `<>`, `>`, `<`, `>=`, `<=`. `IN`, `BETWEEN`, `LIKE` or `IS` raise an error.
 
 ```lua
 :whereColumn("updated_at", ">", "created_at")
@@ -187,6 +191,7 @@ Sets the columns to select (default: `"*"`), as a comma-separated **string** (wh
 Adds a LEFT JOIN.
 
 ```lua
+:select("users.*, profiles.bio")
 :leftJoin("profiles", "profiles.user_id", "users.identifier")
 ```
 
@@ -197,6 +202,7 @@ Adds a LEFT JOIN.
 Adds an INNER JOIN.
 
 ```lua
+:select("users.*, vehicles.plate")
 :innerJoin("vehicles", "vehicles.owner_id", "users.identifier")
 ```
 
@@ -207,8 +213,13 @@ Adds an INNER JOIN.
 Adds a RIGHT JOIN.
 
 ```lua
+:select("vehicles.*, users.identifier AS owner_name")
 :rightJoin("users", "users.identifier", "vehicles.owner_id")
 ```
+
+:::caution Default select with a join
+On a model query (`Model.query()`) with a join, the default select is `table.*` of the model's table, not `*`: otherwise a same-named column of the joined table (`id`...) would overwrite the instance's primary key, and its writes would hit another row. Columns of the joined table are read only when you list them with `:select()`.
+:::
 
 ---
 
@@ -430,7 +441,7 @@ local richest = User.query()
 
 ### `:count()` → `integer`
 
-Counts the rows the query would return, ignoring `orderBy`, `limit` and `offset`. With `:distinct()`, `:groupBy()` or `:having()`, the query is counted as a derived table: `count()` returns the number of distinct rows or groups, not the number of raw rows. With the default select (`*`), the derived table selects the `groupBy` columns, or else `table.*` of the main table, to avoid the duplicate column names of a join.
+Counts the rows the query would return, ignoring `orderBy`, `limit` and `offset`. With `:distinct()`, `:groupBy()` or `:having()`, the query is counted as a derived table: `count()` returns the number of distinct rows or groups, not the number of raw rows. With the default select, the derived table selects the `groupBy` columns, or else `table.*` of the main table, to avoid the duplicate column names of a join.
 
 ```lua
 local nb = User.query()
@@ -505,7 +516,7 @@ local hasCops = User.query():where("job", "police"):exists()
 
 ### `:chunk(size, callback)`
 
-Processes the results in batches with `LIMIT` / `OFFSET`, to avoid loading everything into memory. The callback receives `(rows, chunkIndex)`; returning `false` stops the scan. Batches are not cached.
+Processes the results in batches with `LIMIT` / `OFFSET`, to avoid loading everything into memory. The callback receives `(rows, chunkIndex)`; returning `false` stops the scan. Batches are not cached. A `:limit(n)` set on the builder caps the total number of rows scanned, and the scan starts at its `:offset()`.
 
 ```lua
 User.query():chunk(100, function(rows, chunkIndex)
@@ -536,13 +547,13 @@ User.query():where("job", "police"):chunkById(200, function(cops)
 end, "identifier")
 ```
 
-The builder's sort is replaced by the sort on `column`.
+The builder's sort is replaced by the sort on `column`. A `:limit(n)` set on the builder caps the total number of rows scanned; `:offset()` is refused (a keyset page skips no rows: filter with `:where(column, ">", key)`).
 
 ---
 
 ### `:paginate(page, perPage?)` → `table`
 
-Paginates the results automatically (2 queries: a `count()` and the page). Returns an object with the data and the pagination metadata. The total is correct with `distinct`, `groupBy` and `having` too. `page` and `perPage` must be integers >= 1.
+Paginates the results automatically (2 queries: a `count()` and the page). Returns an object with the data and the pagination metadata. The total is correct with `distinct`, `groupBy` and `having` too. `page` and `perPage` must be integers >= 1; a page so large that the `OFFSET` would overflow raises an error.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -623,8 +634,8 @@ local stats = User.query()
 local players = User.query()
     :select("users.*, profiles.bio, profiles.avatar")
     :leftJoin("profiles", "profiles.user_id", "users.identifier")
-    :where({ job = { "IN", { "police", "medic" } } })
-    :where({ money = { "BETWEEN", { 1000, 50000 } } })
+    :where({ job = OrvexORM.op("IN", { "police", "medic" }) })
+    :where({ money = OrvexORM.op("BETWEEN", { 1000, 50000 }) })
     :orderBy("money", "DESC")
     :limit(20)
     :get()
